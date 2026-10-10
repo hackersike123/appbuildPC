@@ -1,5 +1,11 @@
+// The screen-level async actions intentionally report through their active route.
+// ignore_for_file: use_build_context_synchronously
+
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+import 'api_client.dart';
 
 void main() => runApp(const PcBuildApp());
 
@@ -12,6 +18,15 @@ const muted = Color(0xff8d99a8);
 const greenPanel = Color(0xff173f38);
 
 Future<bool> requestLocationPermission(BuildContext context) async {
+  if (kIsWeb) {
+    if (context.mounted) {
+      showDemoMessage(
+        context,
+        'Web demo dùng khu vực mẫu TP. Hồ Chí Minh; quyền GPS được dùng trên Android.',
+      );
+    }
+    return false;
+  }
   final status = await Permission.locationWhenInUse.request();
   if (context.mounted) {
     showDemoMessage(
@@ -25,6 +40,15 @@ Future<bool> requestLocationPermission(BuildContext context) async {
 }
 
 Future<bool> requestCameraPermission(BuildContext context) async {
+  if (kIsWeb) {
+    if (context.mounted) {
+      showDemoMessage(
+        context,
+        'Web demo dùng ảnh mẫu; quyền camera được dùng trên Android.',
+      );
+    }
+    return false;
+  }
   final status = await Permission.camera.request();
   if (context.mounted) {
     showDemoMessage(
@@ -178,8 +202,17 @@ class Shell extends StatelessWidget {
   );
 }
 
-class WelcomeScreen extends StatelessWidget {
+class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
+  @override
+  State<WelcomeScreen> createState() => _WelcomeScreenState();
+}
+
+class _WelcomeScreenState extends State<WelcomeScreen> {
+  String areaId = 'hcm';
+  String areaName = 'TP. Hồ Chí Minh';
+  bool loadingArea = false;
+
   @override
   Widget build(BuildContext context) => Shell(
     child: SafeArea(
@@ -219,12 +252,14 @@ class WelcomeScreen extends StatelessWidget {
             const SizedBox(height: 16),
             PrimaryButton(
               text: 'Bắt đầu với vị trí của tôi',
-              onPressed: () => _startWithLocation(context),
+              onPressed: loadingArea
+                  ? () {}
+                  : () => _startWithLocation(context),
             ),
             const SizedBox(height: 10),
             SecondaryButton(
               text: 'Chọn khu vực thủ công',
-              onPressed: () => _openHome(context),
+              onPressed: loadingArea ? () {} : () => _chooseArea(context),
             ),
           ],
         ),
@@ -232,18 +267,87 @@ class WelcomeScreen extends StatelessWidget {
     ),
   );
   Future<void> _startWithLocation(BuildContext context) async {
+    setState(() => loadingArea = true);
     await requestLocationPermission(context);
-    if (context.mounted) _openHome(context);
+    try {
+      final result = await ApiClient.instance.resolveLocation();
+      if (!mounted) return;
+      final area = Map<String, dynamic>.from(result['area'] as Map);
+      areaId = area['id'] as String;
+      areaName = area['name'] as String;
+      _openLogin();
+    } catch (_) {
+      if (mounted) _openLogin();
+    } finally {
+      if (mounted) setState(() => loadingArea = false);
+    }
   }
 
-  void _openHome(BuildContext context) => Navigator.pushReplacement(
+  Future<void> _chooseArea(BuildContext context) async {
+    setState(() => loadingArea = true);
+    try {
+      final areas = await ApiClient.instance.areas();
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        backgroundColor: panel2,
+        builder: (sheetContext) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.all(18),
+            children: [
+              const Text(
+                'Chọn khu vực',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              ...areas.map(
+                (area) => ListTile(
+                  title: Text(area['name'] as String),
+                  trailing: area['id'] == areaId
+                      ? const Icon(Icons.check, color: mint)
+                      : null,
+                  onTap: () => Navigator.pop(sheetContext, area),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (chosen != null && mounted) {
+        final result = await ApiClient.instance.resolveLocation(
+          areaId: chosen['id'] as String,
+        );
+        final area = Map<String, dynamic>.from(result['area'] as Map);
+        areaId = area['id'] as String;
+        areaName = area['name'] as String;
+        _openLogin();
+      }
+    } catch (_) {
+      if (mounted) {
+        showDemoMessage(context, 'Không tải được danh sách khu vực.');
+      }
+    } finally {
+      if (mounted) setState(() => loadingArea = false);
+    }
+  }
+
+  void _openLogin() => Navigator.pushReplacement(
     context,
-    MaterialPageRoute(builder: (_) => const MainScreen()),
+    MaterialPageRoute(
+      builder: (_) => LoginScreen(areaId: areaId, areaName: areaName),
+    ),
   );
 }
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({
+    super.key,
+    this.areaId = 'hcm',
+    this.areaName = 'TP. Hồ Chí Minh',
+  });
+  final String areaId;
+  final String areaName;
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
@@ -263,120 +367,160 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) => Shell(
-    child: SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(18, 38, 18, 24),
-        child: Form(
-          key: formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Logo(),
-              const SizedBox(height: 14),
-              const Text(
-                'PCBUILD LOCAL',
-                style: TextStyle(color: mint, fontSize: 11),
-              ),
-              const SizedBox(height: 12),
-              const Text('Chào mừng trở lại', style: TextStyle(fontSize: 29)),
-              const SizedBox(height: 8),
-              const Text(
-                'Đăng nhập để đồng bộ và lưu mọi cấu hình.',
-                style: TextStyle(color: muted),
-              ),
-              const SizedBox(height: 42),
-              const FieldLabel('EMAIL'),
-              TextField(
-                controller: email,
-                keyboardType: TextInputType.emailAddress,
-                decoration: InputDecoration(
-                  prefixIcon: const Icon(Icons.mail_outline),
-                  hintText: 'minh.nguyen@email.com',
-                  errorText: email.text.isNotEmpty && !email.text.contains('@')
-                      ? 'Email chưa hợp lệ'
-                      : null,
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-              const SizedBox(height: 14),
-              const FieldLabel('MẬT KHẨU'),
-              TextField(
-                controller: password,
-                obscureText: obscurePassword,
-                decoration: InputDecoration(
-                  prefixIcon: const Icon(Icons.lock_outline),
-                  hintText: '••••••••••',
-                  suffixIcon: IconButton(
-                    onPressed: () =>
-                        setState(() => obscurePassword = !obscurePassword),
-                    icon: Icon(
-                      obscurePassword ? Icons.visibility : Icons.visibility_off,
-                    ),
+    child: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 390),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(18, 38, 18, 24),
+            child: Form(
+              key: formKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Logo(),
+                  const SizedBox(height: 14),
+                  const Text(
+                    'PCBUILD LOCAL',
+                    style: TextStyle(color: mint, fontSize: 11),
                   ),
-                ),
-              ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: () => _showForgotPassword(context),
-                  child: const Text(
-                    'Quên mật khẩu?',
-                    style: TextStyle(color: mint),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Chào mừng trở lại',
+                    style: TextStyle(fontSize: 29),
                   ),
-                ),
-              ),
-              PrimaryButton(
-                text: 'Đăng nhập',
-                onPressed: busy
-                    ? () {}
-                    : () async {
-                        if (!email.text.contains('@') ||
-                            password.text.length < 6) {
-                          showDemoMessage(
-                            context,
-                            'Demo yêu cầu email hợp lệ và mật khẩu từ 6 ký tự.',
-                          );
-                          return;
-                        }
-                        setState(() => busy = true);
-                        await Future<void>.delayed(
-                          const Duration(milliseconds: 450),
-                        );
-                        if (!context.mounted) return;
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(builder: (_) => const MainScreen()),
-                        );
-                      },
-              ),
-              const SizedBox(height: 20),
-              const Center(
-                child: Text(
-                  'HOẶC TIẾP TỤC VỚI',
-                  style: TextStyle(color: Color(0xff596574), fontSize: 11),
-                ),
-              ),
-              const SizedBox(height: 14),
-              SecondaryButton(
-                text: 'Google',
-                onPressed: () => Navigator.pushReplacement(
-                  context,
-                  MaterialPageRoute(builder: (_) => const MainScreen()),
-                ),
-              ),
-              Center(
-                child: TextButton(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const SignupScreen()),
-                  ),
-                  child: const Text(
-                    'Chưa có tài khoản?  Đăng ký ngay',
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Đăng nhập để đồng bộ và lưu mọi cấu hình.',
                     style: TextStyle(color: muted),
                   ),
-                ),
+                  const SizedBox(height: 42),
+                  const FieldLabel('EMAIL'),
+                  TextField(
+                    controller: email,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.mail_outline),
+                      hintText: 'minh.nguyen@email.com',
+                      errorText:
+                          email.text.isNotEmpty && !email.text.contains('@')
+                          ? 'Email chưa hợp lệ'
+                          : null,
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  const SizedBox(height: 14),
+                  const FieldLabel('MẬT KHẨU'),
+                  TextField(
+                    controller: password,
+                    obscureText: obscurePassword,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.lock_outline),
+                      hintText: '••••••••••',
+                      suffixIcon: IconButton(
+                        onPressed: () =>
+                            setState(() => obscurePassword = !obscurePassword),
+                        icon: Icon(
+                          obscurePassword
+                              ? Icons.visibility
+                              : Icons.visibility_off,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: () => _showForgotPassword(context),
+                      child: const Text(
+                        'Quên mật khẩu?',
+                        style: TextStyle(color: mint),
+                      ),
+                    ),
+                  ),
+                  PrimaryButton(
+                    text: 'Đăng nhập',
+                    onPressed: busy
+                        ? () {}
+                        : () async {
+                            if (!email.text.contains('@') ||
+                                password.text.length < 6) {
+                              showDemoMessage(
+                                context,
+                                'Demo yêu cầu email hợp lệ và mật khẩu từ 6 ký tự.',
+                              );
+                              return;
+                            }
+                            setState(() => busy = true);
+                            try {
+                              await ApiClient.instance.login(
+                                email.text.trim(),
+                                password.text,
+                              );
+                            } on ApiException catch (error) {
+                              if (!context.mounted) return;
+                              showDemoMessage(
+                                context,
+                                error.statusCode == 401
+                                    ? 'Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy đăng ký trước.'
+                                    : error.message,
+                              );
+                              return;
+                            } catch (_) {
+                              if (!context.mounted) return;
+                              showDemoMessage(
+                                context,
+                                'Không kết nối được máy chủ. Hãy chạy backend tại cổng 3000.',
+                              );
+                              return;
+                            }
+                            if (!context.mounted) return;
+                            Navigator.pushReplacement(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => MainScreen(
+                                  areaId: widget.areaId,
+                                  areaName: widget.areaName,
+                                ),
+                              ),
+                            );
+                          },
+                  ),
+                  const SizedBox(height: 20),
+                  const Center(
+                    child: Text(
+                      'HOẶC TIẾP TỤC VỚI',
+                      style: TextStyle(color: Color(0xff596574), fontSize: 11),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  SecondaryButton(
+                    text: 'Google',
+                    onPressed: () => showDemoMessage(
+                      context,
+                      'Đăng nhập Google chưa được cấu hình cho bản demo này.',
+                    ),
+                  ),
+                  Center(
+                    child: TextButton(
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => SignupScreen(
+                            areaId: widget.areaId,
+                            areaName: widget.areaName,
+                          ),
+                        ),
+                      ),
+                      child: const Text(
+                        'Chưa có tài khoản?  Đăng ký ngay',
+                        style: TextStyle(color: muted),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -409,11 +553,24 @@ class _LoginScreenState extends State<LoginScreen> {
                 showDemoMessage(context, 'Vui lòng nhập email hợp lệ.');
                 return;
               }
-              Navigator.pop(dialogContext);
-              showDemoMessage(
-                context,
-                'Đã gửi hướng dẫn khôi phục (mô phỏng demo).',
-              );
+              ApiClient.instance
+                  .forgotPassword(controller.text.trim())
+                  .then((_) {
+                    if (!context.mounted) return;
+                    Navigator.pop(dialogContext);
+                    showDemoMessage(
+                      context,
+                      'Nếu email tồn tại, hướng dẫn khôi phục đã được gửi.',
+                    );
+                  })
+                  .catchError((_) {
+                    if (context.mounted) {
+                      showDemoMessage(
+                        context,
+                        'Không gửi được yêu cầu. Hãy thử lại sau.',
+                      );
+                    }
+                  });
             },
             child: const Text('Gửi hướng dẫn'),
           ),
@@ -425,7 +582,13 @@ class _LoginScreenState extends State<LoginScreen> {
 }
 
 class SignupScreen extends StatefulWidget {
-  const SignupScreen({super.key});
+  const SignupScreen({
+    super.key,
+    this.areaId = 'hcm',
+    this.areaName = 'TP. Hồ Chí Minh',
+  });
+  final String areaId;
+  final String areaName;
   @override
   State<SignupScreen> createState() => _SignupScreenState();
 }
@@ -434,11 +597,10 @@ class _SignupScreenState extends State<SignupScreen> {
   final name = TextEditingController();
   final email = TextEditingController();
   final password = TextEditingController();
-  final confirmPassword = TextEditingController();
-  final area = TextEditingController(text: 'TP. Hồ Chí Minh');
+  late final TextEditingController area;
+  late String selectedAreaId;
   bool acceptedTerms = false;
   bool obscurePassword = true;
-  bool obscureConfirmPassword = true;
   bool busy = false;
 
   @override
@@ -446,9 +608,62 @@ class _SignupScreenState extends State<SignupScreen> {
     name.dispose();
     email.dispose();
     password.dispose();
-    confirmPassword.dispose();
     area.dispose();
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    area = TextEditingController(text: widget.areaName);
+    selectedAreaId = widget.areaId;
+  }
+
+  Future<void> _chooseArea() async {
+    try {
+      final areas = await ApiClient.instance.areas();
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        backgroundColor: panel,
+        builder: (sheetContext) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(18),
+                child: Text(
+                  'Chọn khu vực định giá',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+                ),
+              ),
+              ...areas.map(
+                (item) => ListTile(
+                  title: Text(item['name'] as String),
+                  trailing: item['id'] == selectedAreaId
+                      ? const Icon(Icons.check, color: mint)
+                      : null,
+                  onTap: () => Navigator.pop(sheetContext, item),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (chosen == null || !mounted) return;
+      final result = await ApiClient.instance.resolveLocation(
+        areaId: chosen['id'] as String,
+      );
+      final resolved = Map<String, dynamic>.from(result['area'] as Map);
+      setState(() {
+        selectedAreaId = resolved['id'] as String;
+        area.text = resolved['name'] as String;
+      });
+    } catch (_) {
+      if (mounted) {
+        showDemoMessage(context, 'Không tải được danh sách khu vực.');
+      }
+    }
   }
 
   @override
@@ -456,115 +671,106 @@ class _SignupScreenState extends State<SignupScreen> {
     title: 'Tạo tài khoản',
     subtitle: 'Lưu build, theo dõi giá và nhận tư vấn',
     back: true,
-    child: SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: greenPanel,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Text(
-              '✓ Lưu cấu hình không giới hạn\n✓ Cập nhật giá mới / cũ theo khu vực\n✓ Cảnh báo tương thích tự động',
-              style: TextStyle(height: 1.6),
-            ),
-          ),
-          const SizedBox(height: 18),
-          const FieldLabel('HỌ VÀ TÊN'),
-          TextField(
-            controller: name,
-            decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.person_outline),
-              hintText: 'Nguyễn Minh Anh',
-            ),
-          ),
-          const SizedBox(height: 14),
-          const FieldLabel('EMAIL'),
-          TextField(
-            controller: email,
-            keyboardType: TextInputType.emailAddress,
-            decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.mail_outline),
-              hintText: 'minhanh@email.com',
-            ),
-          ),
-          const SizedBox(height: 14),
-          const FieldLabel('MẬT KHẨU'),
-          TextField(
-            controller: password,
-            obscureText: obscurePassword,
-            decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.lock_outline),
-              hintText: 'Tối thiểu 8 ký tự',
-              suffixIcon: IconButton(
-                onPressed: () =>
-                    setState(() => obscurePassword = !obscurePassword),
-                icon: Icon(
-                  obscurePassword ? Icons.visibility : Icons.visibility_off,
+    child: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 390),
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: greenPanel,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  '✓ Lưu cấu hình không giới hạn\n✓ Cập nhật giá mới / cũ theo khu vực\n✓ Cảnh báo tương thích tự động',
+                  style: TextStyle(height: 1.6),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          const FieldLabel('XÁC NHẬN MẬT KHẨU'),
-          TextField(
-            controller: confirmPassword,
-            obscureText: obscureConfirmPassword,
-            decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.lock_reset_outlined),
-              hintText: 'Nhập lại mật khẩu',
-              suffixIcon: IconButton(
-                onPressed: () => setState(
-                  () => obscureConfirmPassword = !obscureConfirmPassword,
-                ),
-                icon: Icon(
-                  obscureConfirmPassword
-                      ? Icons.visibility
-                      : Icons.visibility_off,
+              const SizedBox(height: 18),
+              const FieldLabel('HỌ VÀ TÊN'),
+              TextField(
+                controller: name,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.person_outline),
+                  hintText: 'Nguyễn Minh Anh',
                 ),
               ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          const FieldLabel('KHU VỰC ĐỊNH GIÁ'),
-          TextField(
-            controller: area,
-            decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.location_on_outlined),
-              hintText: 'TP. Hồ Chí Minh',
-            ),
-          ),
-          const SizedBox(height: 16),
-          CheckboxListTile(
-            value: acceptedTerms,
-            onChanged: (value) =>
-                setState(() => acceptedTerms = value ?? false),
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            activeColor: mint,
-            checkColor: bg,
-            title: const Text(
-              'Tôi đồng ý Điều khoản sử dụng và Chính sách bảo mật.',
-              style: TextStyle(color: muted, fontSize: 12),
-            ),
-          ),
-          const SizedBox(height: 16),
-          PrimaryButton(
-            text: 'Tạo tài khoản',
-            onPressed: busy ? () {} : () => _createAccount(context),
-          ),
-          Center(
-            child: TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text(
-                'Đã có tài khoản?  Đăng nhập',
-                style: TextStyle(color: muted),
+              const SizedBox(height: 14),
+              const FieldLabel('EMAIL'),
+              TextField(
+                controller: email,
+                keyboardType: TextInputType.emailAddress,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.mail_outline),
+                  hintText: 'minhanh@email.com',
+                ),
               ),
-            ),
+              const SizedBox(height: 14),
+              const FieldLabel('MẬT KHẨU'),
+              TextField(
+                controller: password,
+                obscureText: obscurePassword,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  hintText: 'Tối thiểu 8 ký tự',
+                  suffixIcon: IconButton(
+                    onPressed: () =>
+                        setState(() => obscurePassword = !obscurePassword),
+                    icon: Icon(
+                      obscurePassword ? Icons.visibility : Icons.visibility_off,
+                    ),
+                  ),
+                ),
+              ),
+              const FieldLabel('KHU VỰC ĐỊNH GIÁ'),
+              InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: _chooseArea,
+                child: IgnorePointer(
+                  child: TextField(
+                    controller: area,
+                    readOnly: true,
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.location_on_outlined),
+                      suffixIcon: Icon(Icons.keyboard_arrow_down),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              CheckboxListTile(
+                value: acceptedTerms,
+                onChanged: (value) =>
+                    setState(() => acceptedTerms = value ?? false),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                activeColor: mint,
+                checkColor: bg,
+                title: const Text(
+                  'Tôi đồng ý Điều khoản sử dụng và Chính sách bảo mật.',
+                  style: TextStyle(color: muted, fontSize: 12),
+                ),
+              ),
+              const SizedBox(height: 16),
+              PrimaryButton(
+                text: 'Tạo tài khoản',
+                onPressed: busy ? () {} : () => _createAccount(context),
+              ),
+              Center(
+                child: TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text(
+                    'Đã có tài khoản?  Đăng nhập',
+                    style: TextStyle(color: muted),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     ),
   );
@@ -574,9 +780,6 @@ class _SignupScreenState extends State<SignupScreen> {
     if (name.text.trim().length < 2) errors.add('họ tên');
     if (!email.text.contains('@')) errors.add('email hợp lệ');
     if (password.text.length < 8) errors.add('mật khẩu từ 8 ký tự');
-    if (password.text != confirmPassword.text) {
-      errors.add('mật khẩu xác nhận trùng khớp');
-    }
     if (area.text.trim().isEmpty) errors.add('khu vực định giá');
     if (!acceptedTerms) errors.add('đồng ý điều khoản');
     if (errors.isNotEmpty) {
@@ -584,30 +787,69 @@ class _SignupScreenState extends State<SignupScreen> {
       return;
     }
     setState(() => busy = true);
-    await Future<void>.delayed(const Duration(milliseconds: 550));
-    if (!context.mounted) return;
-    showDemoMessage(context, 'Tạo tài khoản thành công trong chế độ demo.');
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const MainScreen()),
-    );
+    try {
+      await ApiClient.instance.register(
+        name.text.trim(),
+        email.text.trim(),
+        password.text,
+        areaId: selectedAreaId,
+      );
+      await ApiClient.instance.login(email.text.trim(), password.text);
+      if (!context.mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) =>
+              MainScreen(areaId: selectedAreaId, areaName: area.text),
+        ),
+      );
+    } on ApiException catch (error) {
+      if (context.mounted) {
+        showDemoMessage(context, error.message);
+      }
+    } catch (_) {
+      if (context.mounted) {
+        showDemoMessage(
+          context,
+          'Không kết nối được máy chủ. Hãy chạy backend tại cổng 3000.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 }
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+  const MainScreen({
+    super.key,
+    this.areaId = 'hcm',
+    this.areaName = 'TP. Hồ Chí Minh',
+  });
+  final String areaId;
+  final String areaName;
   @override
   State<MainScreen> createState() => _MainScreenState();
 }
 
 class _MainScreenState extends State<MainScreen> {
   int tab = 0;
+  late String areaId = widget.areaId;
+  late String areaName = widget.areaName;
   @override
   Widget build(BuildContext context) => Scaffold(
     body: IndexedStack(
       index: tab,
       children: [
-        HomeTab(onOpen: _open),
+        HomeTab(
+          onOpen: _open,
+          areaId: areaId,
+          areaName: areaName,
+          onAreaChanged: (id, name) => setState(() {
+            areaId = id;
+            areaName = name;
+          }),
+        ),
         const BuildTab(),
         const SavedTab(),
         const ChatTab(),
@@ -650,9 +892,182 @@ class _MainScreenState extends State<MainScreen> {
       Navigator.push(context, MaterialPageRoute(builder: (_) => page));
 }
 
-class HomeTab extends StatelessWidget {
-  const HomeTab({super.key, required this.onOpen});
+class HomeTab extends StatefulWidget {
+  const HomeTab({
+    super.key,
+    required this.onOpen,
+    required this.onAreaChanged,
+    this.areaId = 'hcm',
+    this.areaName = 'TP. Hồ Chí Minh',
+  });
   final void Function(Widget) onOpen;
+  final String areaId;
+  final String areaName;
+  final void Function(String id, String name) onAreaChanged;
+  @override
+  State<HomeTab> createState() => _HomeTabState();
+}
+
+class _HomeTabState extends State<HomeTab> {
+  late String currentAreaId = widget.areaId;
+  late String currentAreaName = widget.areaName;
+  bool loadingMarket = true;
+  List<Map<String, dynamic>> marketItems = const [];
+  String? marketError;
+  Map<String, dynamic>? activeBuild;
+  bool loadingBuild = true;
+  List<Map<String, dynamic>> notifications = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMarket();
+    _loadBuild();
+    _loadNotifications();
+  }
+
+  Future<void> _loadNotifications() async {
+    try {
+      final items = await ApiClient.instance.notifications();
+      if (mounted) setState(() => notifications = items);
+    } catch (_) {}
+  }
+
+  Future<void> _openNotifications() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: panel,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(18),
+              child: Text(
+                'Thông báo',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+              ),
+            ),
+            if (notifications.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(18, 0, 18, 24),
+                child: Text(
+                  'Bạn chưa có thông báo mới.',
+                  style: TextStyle(color: muted),
+                ),
+              )
+            else
+              ...notifications.map(
+                (item) => ListTile(
+                  leading: const Icon(Icons.notifications_none, color: mint),
+                  title: Text(item['title'] as String? ?? 'Thông báo'),
+                  subtitle: Text(item['message'] as String? ?? ''),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (notifications.any((item) => item['read'] == false)) {
+      await ApiClient.instance.markNotificationsRead();
+      if (mounted) {
+        setState(() {
+          notifications = notifications
+              .map((item) => {...item, 'read': true})
+              .toList();
+        });
+      }
+    }
+  }
+
+  Future<void> _loadBuild() async {
+    try {
+      final builds = await ApiClient.instance.builds();
+      if (!mounted) return;
+      setState(() {
+        activeBuild = builds.isEmpty ? null : builds.first;
+        loadingBuild = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => loadingBuild = false);
+    }
+  }
+
+  Future<void> _changeArea() async {
+    try {
+      final areas = await ApiClient.instance.areas();
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        backgroundColor: panel,
+        builder: (sheetContext) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(18),
+                child: Text(
+                  'Chọn khu vực định giá',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+                ),
+              ),
+              ...areas.map(
+                (item) => ListTile(
+                  title: Text(item['name'] as String),
+                  trailing: item['id'] == currentAreaId
+                      ? const Icon(Icons.check, color: mint)
+                      : null,
+                  onTap: () => Navigator.pop(sheetContext, item),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (chosen == null || !mounted) return;
+      final result = await ApiClient.instance.resolveLocation(
+        areaId: chosen['id'] as String,
+      );
+      final area = Map<String, dynamic>.from(result['area'] as Map);
+      currentAreaId = area['id'] as String;
+      currentAreaName = area['name'] as String;
+      if (mounted) {
+        setState(() {
+          loadingMarket = true;
+          marketError = null;
+        });
+      }
+      widget.onAreaChanged(currentAreaId, currentAreaName);
+      await _loadMarket();
+    } catch (_) {
+      if (mounted) {
+        showDemoMessage(context, 'Không tải được danh sách khu vực.');
+      }
+    }
+  }
+
+  Future<void> _loadMarket() async {
+    try {
+      final result = await ApiClient.instance.marketSummary(currentAreaId);
+      final items = (result['items'] as List? ?? const [])
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        marketItems = items;
+        marketError = null;
+        loadingMarket = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        marketError = 'Chưa tải được dữ liệu giá';
+        loadingMarket = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     child: SafeArea(
@@ -662,11 +1077,11 @@ class HomeTab extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Column(
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Xin chào, Minh 👋',
+                    'Xin chào, ${ApiClient.instance.currentUser?['name'] ?? 'bạn'} 👋',
                     style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
                   ),
                   SizedBox(height: 4),
@@ -676,27 +1091,52 @@ class HomeTab extends StatelessWidget {
                   ),
                 ],
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 9,
+              InkWell(
+                onTap: _openNotifications,
+                borderRadius: BorderRadius.circular(20),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: panel2,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.notifications_none, size: 16),
+                      if (notifications.any(
+                        (item) => item['read'] == false,
+                      )) ...[
+                        const SizedBox(width: 5),
+                        Text(
+                          '${notifications.where((item) => item['read'] == false).length}',
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
-                decoration: BoxDecoration(
-                  color: panel2,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: const Text('🔔 2'),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          const InfoTile(
-            icon: Icons.location_on_outlined,
-            text: 'GIÁ THỊ TRƯỜNG TẠI\nTP. Hồ Chí Minh • GPS',
-            trailing: 'Thay đổi',
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: _changeArea,
+            child: InfoTile(
+              icon: Icons.location_on_outlined,
+              text: 'GIÁ THỊ TRƯỜNG TẠI\n$currentAreaName • API',
+              trailing: 'Thay đổi',
+            ),
           ),
           const SizedBox(height: 16),
-          const MarketCard(),
+          MarketCard(
+            items: marketItems,
+            loading: loadingMarket,
+            error: marketError,
+          ),
           const SizedBox(height: 18),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -723,27 +1163,27 @@ class HomeTab extends StatelessWidget {
               QuickCard(
                 icon: Icons.memory,
                 text: 'Build PC',
-                onTap: () => onOpen(const BuildTab()),
+                onTap: () => widget.onOpen(const BuildTab()),
               ),
               QuickCard(
                 icon: Icons.camera_alt_outlined,
                 text: 'Quét SP',
-                onTap: () => onOpen(const ScannerScreen()),
+                onTap: () => widget.onOpen(const ScannerScreen()),
               ),
               QuickCard(
                 icon: Icons.scatter_plot,
                 text: 'So giá',
-                onTap: () => onOpen(const ProductListScreen()),
+                onTap: () => widget.onOpen(const ProductListScreen()),
               ),
               QuickCard(
                 icon: Icons.chat_bubble_outline,
                 text: 'Tư vấn',
-                onTap: () => onOpen(const ChatTab()),
+                onTap: () => widget.onOpen(const ChatTab()),
               ),
             ],
           ),
           const SizedBox(height: 18),
-          const BuildProgress(),
+          BuildProgress(buildData: activeBuild, loading: loadingBuild),
         ],
       ),
     ),
@@ -758,6 +1198,7 @@ class BuildTab extends StatefulWidget {
 
 class _BuildTabState extends State<BuildTab> {
   bool saved = false;
+  final selectedIds = <String, String>{};
   final selected = <String, String>{
     'CPU': 'Ryzen 5 7600',
     'MAINBOARD': 'MSI B650M Gaming Plus',
@@ -797,6 +1238,17 @@ class _BuildTabState extends State<BuildTab> {
         prices[type] = result.$2;
         saved = false;
       });
+      final productId = ApiClient.instance.productIdsByName[result.$1];
+      if (productId != null && ApiClient.instance.token != null) {
+        selectedIds[type] = productId;
+        try {
+          await ApiClient.instance.updateComponent(type, productId);
+        } catch (error) {
+          if (mounted) {
+            showDemoMessage(context, 'Chưa đồng bộ được linh kiện: $error');
+          }
+        }
+      }
     }
   }
 
@@ -810,7 +1262,7 @@ class _BuildTabState extends State<BuildTab> {
     title: 'Gaming 20 triệu',
     subtitle: '5/8 linh kiện • TP. Hồ Chí Minh',
     action: TextButton.icon(
-      onPressed: () {
+      onPressed: () async {
         if (!isComplete) {
           showDemoMessage(
             context,
@@ -818,8 +1270,25 @@ class _BuildTabState extends State<BuildTab> {
           );
           return;
         }
+        if (ApiClient.instance.token != null) {
+          try {
+            if (ApiClient.instance.buildId == null) {
+              await ApiClient.instance.createBuild();
+            }
+          } catch (error) {
+            if (mounted) {
+              showDemoMessage(context, 'Không thể lưu build: $error');
+            }
+            return;
+          }
+        }
         setState(() => saved = true);
-        showDemoMessage(context, 'Đã lưu cấu hình Gaming 20 triệu.');
+        showDemoMessage(
+          context,
+          ApiClient.instance.token == null
+              ? 'Hãy đăng nhập để lưu build vào tài khoản.'
+              : 'Đã lưu cấu hình lên PCBUILD API.',
+        );
       },
       icon: Icon(saved ? Icons.check : Icons.bookmark_border, color: mint),
       label: Text(
@@ -887,13 +1356,33 @@ class _BuildTabState extends State<BuildTab> {
           const SizedBox(height: 10),
           SecondaryButton(
             text: 'Kiểm tra tương thích',
-            onPressed: () {
+            onPressed: () async {
               if (!isComplete) {
                 showDemoMessage(
                   context,
                   'Chưa thể kiểm tra: cấu hình còn thiếu linh kiện.',
                 );
                 return;
+              }
+              if (ApiClient.instance.token != null) {
+                try {
+                  final report = await ApiClient.instance.checkBuild(
+                    selectedIds,
+                  );
+                  if (!mounted) return;
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => CompatibilityScreen(report: report),
+                    ),
+                  );
+                  return;
+                } catch (error) {
+                  if (mounted) {
+                    showDemoMessage(context, 'Không kiểm tra được: $error');
+                  }
+                  return;
+                }
               }
               Navigator.push(
                 context,
@@ -907,7 +1396,7 @@ class _BuildTabState extends State<BuildTab> {
   );
 }
 
-class ProductListScreen extends StatelessWidget {
+class ProductListScreen extends StatefulWidget {
   const ProductListScreen({
     super.key,
     this.componentType = 'GPU',
@@ -915,116 +1404,44 @@ class ProductListScreen extends StatelessWidget {
   });
   final String componentType;
   final void Function(String name, double price)? onSelected;
+  @override
+  State<ProductListScreen> createState() => _ProductListScreenState();
+}
 
-  List<Product> get _items {
-    if (componentType == 'GPU') return products;
-    final options = <String, List<Product>>{
-      'CPU': [
-        const Product(
-          'AMD Ryzen 5 7600',
-          '4,89tr',
-          'AM5 · 6 nhân',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'AMD Ryzen 7 7800X3D',
-          '9,99tr',
-          'AM5 · Gaming',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-      'MAINBOARD': [
-        const Product(
-          'MSI B650M Gaming Plus',
-          '3,69tr',
-          'AM5 · DDR5',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'ASUS TUF B650-PLUS',
-          '4,29tr',
-          'AM5 · ATX',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-      'RAM': [
-        const Product(
-          'Kingston Fury 32GB DDR5',
-          '2,15tr',
-          '6000 MT/s',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'Corsair Vengeance 32GB',
-          '2,39tr',
-          '6000 MT/s',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-      'SSD': [
-        const Product(
-          'WD Black SN770 1TB',
-          '1,89tr',
-          'NVMe Gen4',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'Samsung 990 EVO 1TB',
-          '2,29tr',
-          'NVMe Gen4',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-      'PSU': [
-        const Product(
-          'Corsair RM650e 650W',
-          '1,79tr',
-          '80+ Gold · ATX 3.0',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'MSI MAG A750GL 750W',
-          '2,19tr',
-          '80+ Gold · ATX 3.0',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-      'CASE': [
-        const Product(
-          'Montech Air 100',
-          '1,19tr',
-          'M-ATX · Mesh',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'Lian Li Lancool 216',
-          '2,49tr',
-          'ATX · Airflow',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-      'TẢN NHIỆT': [
-        const Product(
-          'DeepCool AK400',
-          '0,79tr',
-          'TDP 220W',
-          'assets/figma/gpu1.jpeg',
-        ),
-        const Product(
-          'Thermalright Peerless Assassin',
-          '1,19tr',
-          'TDP 265W',
-          'assets/figma/gpu2.png',
-        ),
-      ],
-    };
-    return options[componentType] ?? products;
+class _ProductListScreenState extends State<ProductListScreen> {
+  late Future<List<Product>> productsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    productsFuture = _loadProducts();
+  }
+
+  Future<List<Product>> _loadProducts() async {
+    try {
+      final data = await ApiClient.instance.products(widget.componentType);
+      return data.map((item) {
+        final name = item['name'] as String;
+        ApiClient.instance.productIdsByName[name] = item['id'] as String;
+        return Product(
+          name,
+          '${((item['price'] as num) / 1000000).toStringAsFixed(2).replaceAll('.', ',')}tr',
+          '${item['socket'] ?? item['ram'] ?? item['form'] ?? 'Giá khu vực'} · API',
+          item['type'] == 'GPU'
+              ? 'assets/figma/gpu1.jpeg'
+              : 'assets/figma/gpu2.png',
+        );
+      }).toList();
+    } catch (_) {
+      if (widget.componentType == 'GPU') return products;
+      return const [];
+    }
   }
 
   @override
   Widget build(BuildContext context) => Shell(
-    title: 'Chọn $componentType',
-    subtitle: '${_items.length} sản phẩm phù hợp tại TP. Hồ Chí Minh',
+    title: 'Chọn ${widget.componentType}',
+    subtitle: 'Giá và sản phẩm lấy từ PCBUILD API',
     back: true,
     child: SafeArea(
       child: ListView(
@@ -1049,27 +1466,50 @@ class ProductListScreen extends StatelessWidget {
           ),
           const SizedBox(height: 14),
           const InfoTile(
-            text: 'Giá trung vị RTX 4060 tại khu vực',
-            trailing: '8,55tr',
+            text: 'Giá hiện tại từ catalog khu vực',
+            trailing: 'API',
           ),
           const SizedBox(height: 8),
-          ..._items.map(
-            (p) => ProductCard(
-              product: p,
-              onTap: () {
-                final price = productPriceInMillions(p.price);
-                if (onSelected != null) {
-                  onSelected!(p.name, price);
-                } else {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const CompatibilityScreen(),
-                    ),
-                  );
-                }
-              },
-            ),
+          FutureBuilder<List<Product>>(
+            future: productsFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const Padding(
+                  padding: EdgeInsets.all(28),
+                  child: Center(child: CircularProgressIndicator(color: mint)),
+                );
+              }
+              if (snapshot.hasError || snapshot.data!.isEmpty) {
+                return const CardBox(
+                  child: Text(
+                    'Chưa tải được sản phẩm. Hãy kiểm tra backend và thử lại.',
+                    style: TextStyle(color: Colors.amber),
+                  ),
+                );
+              }
+              return Column(
+                children: snapshot.data!
+                    .map(
+                      (p) => ProductCard(
+                        product: p,
+                        onTap: () {
+                          final price = productPriceInMillions(p.price);
+                          if (widget.onSelected != null) {
+                            widget.onSelected!(p.name, price);
+                          } else {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const CompatibilityScreen(),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    )
+                    .toList(),
+              );
+            },
           ),
         ],
       ),
@@ -1167,7 +1607,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
 }
 
 class CompatibilityScreen extends StatelessWidget {
-  const CompatibilityScreen({super.key});
+  const CompatibilityScreen({super.key, this.report});
+  final Map<String, dynamic>? report;
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Báo cáo tương thích',
@@ -1177,32 +1618,28 @@ class CompatibilityScreen extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
         children: [
-          ScoreCard(),
+          ScoreCard(score: report?['score'] as int?),
           const SizedBox(height: 14),
-          WarningRow(
-            icon: Icons.error_outline,
-            color: Colors.redAccent,
-            title: 'PSU 550W không đủ công suất',
-            text: 'RTX 4070 Super + Ryzen 7 7800X3D cần tối thiểu 650W; khuyến nghị 750W.',
-          ),
-          WarningRow(
-            icon: Icons.warning_amber,
-            color: Colors.amber,
-            title: 'RAM có thể chạy dưới tốc độ công bố',
-            text: 'DDR5-6400 sẽ hạ về 6000 MT/s theo mức tối ưu của CPU.',
-          ),
-          WarningRow(
-            icon: Icons.warning_amber,
-            color: Colors.amber,
-            title: 'Khoảng hở tản nhiệt sát giới hạn',
-            text: 'Tản khí cao 158 mm, case hỗ trợ tối đa 160 mm.',
-          ),
-          WarningRow(
-            icon: Icons.check_circle_outline,
-            color: Colors.greenAccent,
-            title: 'Socket & chipset tương thích',
-            text: 'Ryzen 7 7800X3D sử dụng AM5, tương thích mainboard B650.',
-          ),
+          if (report == null)
+            const WarningRow(
+              icon: Icons.info_outline,
+              color: Colors.amber,
+              title: 'Chưa có báo cáo từ API',
+              text: 'Đăng nhập và chọn linh kiện để kiểm tra cấu hình thật.',
+            )
+          else
+            ...(report!['issues'] as List<dynamic>).map(
+              (issue) => WarningRow(
+                icon: issue['severity'] == 'error'
+                    ? Icons.error_outline
+                    : Icons.warning_amber,
+                color: issue['severity'] == 'error'
+                    ? Colors.redAccent
+                    : Colors.amber,
+                title: issue['code'].toString(),
+                text: issue['message'].toString(),
+              ),
+            ),
           const SizedBox(height: 14),
           const Text(
             'Đề xuất thay thế',
@@ -1232,6 +1669,25 @@ class ChatTab extends StatefulWidget {
 
 class _ChatTabState extends State<ChatTab> {
   final question = TextEditingController();
+  String? conversationId;
+  final messages = <Map<String, String>>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _startConversation();
+  }
+
+  Future<void> _startConversation() async {
+    if (ApiClient.instance.token == null) return;
+    try {
+      final conversation = await ApiClient.instance.createConversation();
+      if (mounted) {
+        setState(() => conversationId = conversation['id'] as String);
+      }
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
     question.dispose();
@@ -1253,10 +1709,12 @@ class _ChatTabState extends State<ChatTab> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(18, 8, 18, 8),
               children: [
-                ChatBubble(
-                  text: 'Chào Minh! Bạn đang tìm linh kiện nào, ngân sách và nhu cầu chính là gì?',
-                  dark: true,
-                ),
+                if (messages.isEmpty)
+                  const ChatBubble(
+                    text:
+                        'Chào bạn! Hãy hỏi về linh kiện, giá hoặc tương thích.',
+                    dark: true,
+                  ),
                 const Wrap(
                   spacing: 6,
                   children: [
@@ -1265,14 +1723,11 @@ class _ChatTabState extends State<ChatTab> {
                     Tag('So sánh hàng cũ/mới'),
                   ],
                 ),
-                ChatBubble(
-                  text: 'Gợi ý GPU chơi 2K, nguồn 650W, ưu tiên giá tốt tại TP.HCM.',
-                  dark: false,
-                ),
-                ChatBubble(
-                  text: 'RTX 4060 Ti 8GB phù hợp nhất: hiệu suất 2K tốt, nguồn 650W đủ và giá mới đang giảm 4%.',
-                  dark: true,
-                  product: true,
+                ...messages.map(
+                  (message) => ChatBubble(
+                    text: message['text']!,
+                    dark: message['role'] == 'assistant',
+                  ),
                 ),
               ],
             ),
@@ -1303,17 +1758,41 @@ class _ChatTabState extends State<ChatTab> {
     ),
   );
 
-  void _send(BuildContext context) {
+  Future<void> _send(BuildContext context) async {
     final text = question.text.trim();
     if (text.isEmpty) {
       showDemoMessage(context, 'Hãy nhập câu hỏi trước khi gửi.');
       return;
     }
     question.clear();
-    showDemoMessage(
-      context,
-      'BuildMate: Mình đã ghi nhận “$text”. Đây là tư vấn mô phỏng trong demo.',
-    );
+    setState(() => messages.add({'role': 'user', 'text': text}));
+    if (ApiClient.instance.token == null) {
+      setState(
+        () => messages.add({
+          'role': 'assistant',
+          'text': 'Hãy đăng nhập để BuildMate gửi câu hỏi lên API.',
+        }),
+      );
+      return;
+    }
+    try {
+      conversationId ??=
+          (await ApiClient.instance.createConversation())['id'] as String;
+      final response = await ApiClient.instance.sendMessage(
+        conversationId!,
+        text,
+      );
+      if (mounted) {
+        setState(
+          () => messages.add({
+            'role': 'assistant',
+            'text': response['answer'] as String,
+          }),
+        );
+      }
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không gửi được tin nhắn: $error');
+    }
   }
 }
 
@@ -1399,17 +1878,17 @@ class AccountTab extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 12),
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         'Minh Nguyễn',
-                        style: TextStyle(fontWeight: FontWeight.bold),
+                        style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       Text(
                         'minh.nguyen@email.com',
-                        style: TextStyle(color: muted, fontSize: 11),
+                        style: const TextStyle(color: muted, fontSize: 11),
                       ),
                     ],
                   ),
@@ -1656,7 +2135,21 @@ class InfoTile extends StatelessWidget {
 }
 
 class MarketCard extends StatelessWidget {
-  const MarketCard({super.key});
+  const MarketCard({
+    super.key,
+    this.items = const [],
+    this.loading = false,
+    this.error,
+  });
+  final List<Map<String, dynamic>> items;
+  final bool loading;
+  final String? error;
+
+  String _price(dynamic value) {
+    final price = (num.tryParse(value.toString()) ?? 0) / 1000000;
+    return '${price.toStringAsFixed(2).replaceAll('.', ',')}tr';
+  }
+
   @override
   Widget build(BuildContext context) => CardBox(
     child: Column(
@@ -1673,22 +2166,38 @@ class MarketCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
-        ...[
-          ['RTX 4060 8GB', '8,49tr  ↓ 3,2%'],
-          ['Ryzen 5 7600', '4,89tr  ↑ 1,8%'],
-          ['DDR5 32GB', '2,15tr  ↑ 2,1%'],
-        ].map(
-          (v) => Padding(
-            padding: const EdgeInsets.only(bottom: 7),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(v[0], style: const TextStyle(color: muted)),
-                Text(v[1], style: const TextStyle(fontWeight: FontWeight.bold)),
-              ],
+        if (loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: LinearProgressIndicator(
+              color: mint,
+              backgroundColor: stroke,
+            ),
+          )
+        else if (error != null)
+          Text(error!, style: const TextStyle(color: muted))
+        else
+          ...items.map(
+            (item) => Padding(
+              padding: const EdgeInsets.only(bottom: 7),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      item['name'] as String? ?? 'Sản phẩm',
+                      style: const TextStyle(color: muted),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(
+                    '${_price(item['price'])}  ${item['trend'] < 0 ? '↓' : '↑'} ${item['trend'].abs()}%',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
       ],
     ),
   );
@@ -1720,7 +2229,10 @@ class QuickCard extends StatelessWidget {
 }
 
 class BuildProgress extends StatelessWidget {
-  const BuildProgress({super.key});
+  const BuildProgress({super.key, this.buildData, this.loading = false});
+  final Map<String, dynamic>? buildData;
+  final bool loading;
+
   @override
   Widget build(BuildContext context) => CardBox(
     child: Column(
@@ -1731,16 +2243,28 @@ class BuildProgress extends StatelessWidget {
           style: TextStyle(color: Colors.amber, fontSize: 10),
         ),
         const SizedBox(height: 8),
-        const Text(
-          'Gaming 20 triệu • 5/8 linh kiện',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 10),
-        LinearProgressIndicator(
-          value: .62,
-          color: mint,
-          backgroundColor: stroke,
-        ),
+        if (loading)
+          const Text(
+            'Đang tải cấu hình của bạn...',
+            style: TextStyle(color: muted),
+          )
+        else if (buildData == null)
+          const Text(
+            'Bạn chưa có cấu hình nào',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          )
+        else ...[
+          Text(
+            '${buildData!['name'] ?? 'Build của tôi'} • ${buildData!['completion'] ?? 0}%',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 10),
+          LinearProgressIndicator(
+            value: ((buildData!['completion'] as num?)?.toDouble() ?? 0) / 100,
+            color: mint,
+            backgroundColor: stroke,
+          ),
+        ],
       ],
     ),
   );
@@ -1896,7 +2420,8 @@ class ProductCard extends StatelessWidget {
 }
 
 class ScoreCard extends StatelessWidget {
-  const ScoreCard({super.key});
+  const ScoreCard({super.key, this.score});
+  final int? score;
   @override
   Widget build(BuildContext context) => CardBox(
     child: Row(
@@ -1914,22 +2439,28 @@ class ScoreCard extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 10),
-        const Expanded(
+        Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Cần điều chỉnh',
+                score == null
+                    ? 'Cần điều chỉnh'
+                    : score! >= 80
+                    ? 'Tương thích tốt'
+                    : 'Cần điều chỉnh',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               Text(
-                '11 lỗi • 2 cảnh báo • 9 tiêu chí đạt',
+                score == null
+                    ? '11 lỗi • 2 cảnh báo • 9 tiêu chí đạt'
+                    : 'Điểm tương thích từ API: $score/100',
                 style: TextStyle(color: muted, fontSize: 11),
               ),
             ],
           ),
         ),
-        const Tag('12/12'),
+        Tag(score == null ? '12/12' : '$score/100'),
       ],
     ),
   );

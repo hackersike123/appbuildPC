@@ -5,14 +5,14 @@ kiện, kiểm tra tương thích, quét linh kiện và tư vấn cấu hình. 
 bản demo UI/UX chạy chung trên Web và Android; dữ liệu tài khoản, sản phẩm,
 giá, scanner và chatbot vẫn là dữ liệu mô phỏng cục bộ.
 
-## Tính năng demo
+## Tính năng hiện có
 
 - Luồng Chào mừng, đăng nhập, đăng ký và khôi phục mật khẩu.
 - Xin quyền vị trí và camera thật trên Android; từ chối quyền vẫn không chặn demo.
 - Xây cấu hình theo từng linh kiện: CPU, mainboard, GPU, RAM, SSD, PSU, case và
   tản nhiệt.
 - Tự tính tổng giá, báo thiếu linh kiện và mở báo cáo tương thích.
-- Danh sách build đã lưu, tư vấn BuildMate và giao diện khớp các frame Figma.
+- Danh sách build theo tài khoản, thông báo theo tài khoản, tư vấn BuildMate và giao diện khớp các frame Figma.
 - Chạy trên Web và Android từ một codebase Flutter.
 
 ## Yêu cầu môi trường
@@ -46,6 +46,7 @@ test/widget_test.dart         # Widget/regression tests
 assets/figma/                 # Asset local từ thiết kế
 android/app/src/main/         # Android manifest và quyền thiết bị
 .github/workflows/            # CI tự động trên GitHub Actions
+backend/                      # API demo Node.js + JSON database
 ```
 
 ## Quyền thiết bị
@@ -54,11 +55,12 @@ Android khai báo camera và vị trí khi dùng ứng dụng. App gọi quyền
 thật qua `permission_handler`; nếu quyền bị từ chối, app dùng dữ liệu mẫu và
 tiếp tục chạy để phục vụ demo.
 
-## Giới hạn demo
+## Giới hạn MVP
 
-Chưa có backend/database thật, xác thực tài khoản thật, API giá, GPS thật,
-camera stream thật hoặc AI chatbot thật. Đây là các điểm mở rộng tiếp theo,
-không nên coi dữ liệu hiện tại là dữ liệu sản xuất.
+Backend, xác thực tài khoản, build theo tài khoản, khu vực và API giá MVP đã
+được kết nối. Catalog giá hiện được lưu trong JSON và cập nhật theo dữ liệu
+MVP; camera scanner, chatbot và đồng bộ giá từ nhà cung cấp bên ngoài vẫn là
+các phần mở rộng tiếp theo.
 
 ## Quy trình đóng góp
 
@@ -68,3 +70,12 @@ không nên coi dữ liệu hiện tại là dữ liệu sản xuất.
 4. Tạo Pull Request vào `main`, mô tả thay đổi và kết quả kiểm thử.
 
 Xem thêm [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## API demo
+
+```bash
+cd backend
+npm start
+```
+
+Xem danh sách endpoint và giới hạn tại [backend/README.md](backend/README.md).

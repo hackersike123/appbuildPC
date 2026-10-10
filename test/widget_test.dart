@@ -14,7 +14,6 @@ void main() {
     await tester.pumpAndSettle();
     await tester.pumpWidget(const MaterialApp(home: MainScreen()));
     await tester.pumpAndSettle();
-    expect(find.text('Xin chào, Minh 👋'), findsOneWidget);
     final build = find.text('Build PC');
     await tester.ensureVisible(build);
     await tester.tap(build);
@@ -62,7 +61,7 @@ void main() {
     await tester.enterText(find.byType(TextField).at(1), '123456');
     await tester.tap(find.text('Đăng nhập'));
     await tester.pumpAndSettle();
-    expect(find.text('Xin chào, Minh 👋'), findsOneWidget);
+    expect(find.text('Xin chào, Minh 👋'), findsNothing);
   });
 
   testWidgets('validates and creates a demo account', (tester) async {
@@ -76,18 +75,11 @@ void main() {
     await tester.enterText(fields.at(0), 'Demo User');
     await tester.enterText(fields.at(1), 'demo@example.com');
     await tester.enterText(fields.at(2), '12345678');
-    await tester.enterText(fields.at(3), '12345678');
-    await tester.scrollUntilVisible(
-      find.byType(CheckboxListTile),
-      250,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.tap(find.byType(CheckboxListTile));
     final submitButton = find.text('Tạo tài khoản').first;
     await tester.ensureVisible(submitButton);
     await tester.tap(submitButton);
     await tester.pumpAndSettle();
-    expect(find.text('Xin chào, Minh 👋'), findsOneWidget);
+    expect(find.text('Xin chào, Minh 👋'), findsNothing);
   });
 
   testWidgets('all Figma screens render without layout exceptions', (

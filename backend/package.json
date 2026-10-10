@@ -1,0 +1,10 @@
+{
+  "name": "pcbuild-local-api",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Simple API for the PCBUILD LOCAL demo",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
