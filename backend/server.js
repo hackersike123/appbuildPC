@@ -1,13 +1,46 @@
+require('dotenv').config();
+
 const http = require('node:http');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const nodemailer = require('nodemailer');
 
 const PORT = Number(process.env.PORT || 3000);
 const DB_FILE = process.env.PCBUILD_DB_FILE || path.join(__dirname, 'data.json');
-const tokens = new Map();
+const JWT_SECRET = process.env.JWT_SECRET || 'pcbuild-local-development-secret-change-me';
+const JWT_EXPIRES_IN = Number(process.env.JWT_EXPIRES_IN || 3600);
+const API_ISSUER = 'pcbuild-local-api';
+const API_AUDIENCE = 'pcbuild-local-app';
 const money = (value) => Math.round(Number(value) || 0);
 const id = (prefix) => `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
+function base64Url(value) {
+  return Buffer.from(value).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function createAccessToken(user) {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { sub: user.id, email: user.email, iss: API_ISSUER, aud: API_AUDIENCE, iat: now, exp: now + JWT_EXPIRES_IN };
+  const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const body = base64Url(JSON.stringify(payload));
+  const input = `${header}.${body}`;
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(input).digest();
+  return `${input}.${base64Url(signature)}`;
+}
+function verifyAccessToken(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) return null;
+  const input = `${parts[0]}.${parts[1]}`;
+  const expected = crypto.createHmac('sha256', JWT_SECRET).update(input).digest();
+  const received = Buffer.from(parts[2].replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (payload.iss !== API_ISSUER || payload.aud !== API_AUDIENCE || Number(payload.exp) <= Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
 
 const seed = {
   users: [],
@@ -18,12 +51,21 @@ const seed = {
   ],
   products: [
     { id: 'cpu-7600', type: 'CPU', name: 'AMD Ryzen 5 7600', price: 4890000, power: 65, socket: 'AM5' },
+    { id: 'cpu-7800x3d', type: 'CPU', name: 'AMD Ryzen 7 7800X3D', price: 8990000, power: 120, socket: 'AM5' },
     { id: 'mb-b650m', type: 'MAINBOARD', name: 'MSI B650M Gaming Plus', price: 3690000, socket: 'AM5', ram: 'DDR5', form: 'mATX' },
+    { id: 'mb-b650-aorus', type: 'MAINBOARD', name: 'Gigabyte B650 AORUS Elite AX', price: 5290000, socket: 'AM5', ram: 'DDR5', form: 'ATX' },
     { id: 'gpu-4060', type: 'GPU', name: 'ASUS Dual GeForce RTX 4060 OC 8GB', price: 8690000, power: 115, length: 227 },
+    { id: 'gpu-4060-gigabyte', type: 'GPU', name: 'Gigabyte RTX 4060 Windforce OC 8GB', price: 7250000, power: 115, length: 201 },
+    { id: 'gpu-4060-msi', type: 'GPU', name: 'MSI RTX 4060 Ventus 2X Black 8G OC', price: 8490000, power: 115, length: 199 },
+    { id: 'gpu-3060-zotac', type: 'GPU', name: 'Zotac Gaming RTX 3060 Twin Edge 12GB', price: 5900000, power: 170, length: 224 },
     { id: 'ram-32-ddr5', type: 'RAM', name: 'Kingston Fury 32GB DDR5', price: 2150000, ram: 'DDR5' },
+    { id: 'ram-16-ddr5', type: 'RAM', name: 'Corsair Vengeance 16GB DDR5', price: 1190000, ram: 'DDR5' },
     { id: 'ssd-sn770', type: 'SSD', name: 'WD Black SN770 1TB', price: 1890000 },
+    { id: 'ssd-nv2', type: 'SSD', name: 'Kingston NV2 1TB', price: 1590000 },
     { id: 'psu-650', type: 'PSU', name: 'Corsair RM650e 650W', price: 1790000, watts: 650 },
+    { id: 'psu-750', type: 'PSU', name: 'Cooler Master MWE Gold 750W', price: 2290000, watts: 750 },
     { id: 'case-air-100', type: 'CASE', name: 'Montech Air 100', price: 1190000, form: 'mATX', gpuLength: 330 },
+    { id: 'case-h5-flow', type: 'CASE', name: 'NZXT H5 Flow', price: 2190000, form: 'ATX', gpuLength: 365 },
     { id: 'cooler-ak400', type: 'TẢN NHIỆT', name: 'DeepCool AK400', price: 790000, socket: 'AM5' }
   ],
   builds: [], alerts: [], conversations: [], scans: [], notifications: [], market: {}
@@ -33,8 +75,12 @@ function loadDb() {
   try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { return structuredClone(seed); }
 }
 let db = loadDb();
+for (const item of seed.products) {
+  if (!db.products.some((existing) => existing.id === item.id)) db.products.push(item);
+}
 db.notifications ??= [];
 db.market ??= {};
+db.passwordResetTokens ??= [];
 for (const area of db.areas) {
   db.market[area.id] ??= {};
   for (const item of db.products) {
@@ -54,6 +100,13 @@ function send(res, status, body) {
   });
   res.end(JSON.stringify(body));
 }
+function sendHtml(res, status, html) {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'access-control-allow-origin': '*',
+  });
+  res.end(html);
+}
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -63,9 +116,10 @@ function readBody(req) {
   });
 }
 function auth(req) {
-  const token = (req.headers.authorization || '').replace('Bearer ', '');
-  const userId = tokens.get(token);
-  return db.users.find((user) => user.id === userId);
+  const header = String(req.headers.authorization || '');
+  if (!header.startsWith('Bearer ')) return null;
+  const claims = verifyAccessToken(header.slice(7));
+  return claims ? db.users.find((user) => user.id === claims.sub) : null;
 }
 function requireAuth(req, res) {
   const user = auth(req);
@@ -76,9 +130,47 @@ function publicUser(user) {
   const { passwordHash, ...safe } = user;
   return safe;
 }
+const RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
+const resetTokenHash = (token) =>
+  crypto.createHash('sha256').update(token).digest('hex');
+let mailTransport;
+function getMailTransport() {
+  if (mailTransport) return mailTransport;
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    throw new Error('SMTP_USER và SMTP_PASS chưa được cấu hình.');
+  }
+  mailTransport = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: String(process.env.SMTP_SECURE || 'true') === 'true',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  return mailTransport;
+}
+function resetUrlFor(token) {
+  const baseUrl = String(process.env.APP_BASE_URL || '').replace(/\/+$/, '');
+  if (!baseUrl) throw new Error('APP_BASE_URL chưa được cấu hình.');
+  return `${baseUrl}/reset-password?token=${encodeURIComponent(token)}`;
+}
+async function sendPasswordResetEmail(user, token) {
+  const resetUrl = resetUrlFor(token);
+  await getMailTransport().sendMail({
+    from: `"PCBUILD LOCAL" <${process.env.SMTP_USER}>`,
+    to: user.email,
+    subject: 'Khôi phục mật khẩu PCBUILD LOCAL',
+    text: `Xin chào ${user.name},\n\nMở liên kết sau trong 15 phút để đặt lại mật khẩu:\n${resetUrl}\n\nNếu bạn không yêu cầu, hãy bỏ qua email này.`,
+    html: `<h2>Khôi phục mật khẩu</h2><p>Xin chào ${user.name},</p><p>Liên kết đặt lại mật khẩu có hiệu lực trong 15 phút:</p><p><a href="${resetUrl}">Đặt lại mật khẩu</a></p><p>Nếu bạn không yêu cầu, hãy bỏ qua email này.</p>`,
+  });
+}
 function product(idValue) { return db.products.find((item) => item.id === idValue); }
+function decodePathPart(value) {
+  try { return decodeURIComponent(value); } catch { return value; }
+}
+const componentTypes = ['CPU', 'MAINBOARD', 'GPU', 'RAM', 'SSD', 'PSU', 'CASE', 'TẢN NHIỆT'];
 function buildView(build) {
-  const components = Object.fromEntries(Object.entries(build.components).map(([type, productId]) => [type, product(productId)]));
+  const components = Object.fromEntries(
+    componentTypes.map((type) => [type, product(build.components[type]) || null])
+  );
   const total = Object.values(components).filter(Boolean).reduce((sum, item) => sum + item.price, 0);
   return { ...build, components, totalPrice: total, completion: Math.round(Object.values(components).filter(Boolean).length / 8 * 100) };
 }
@@ -104,6 +196,38 @@ async function route(req, res) {
   const method = req.method;
   if (method === 'OPTIONS') return send(res, 204, {});
   if (method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, service: 'pcbuild-local-api' });
+  if (method === 'GET' && url.pathname === '/openapi.json') {
+    return send(res, 200, JSON.parse(fs.readFileSync(path.join(__dirname, 'openapi.json'), 'utf8')));
+  }
+  if (method === 'GET' && url.pathname === '/docs') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'access-control-allow-origin': '*' });
+    return res.end(`<!doctype html><html><head><title>PCBUILD LOCAL API</title><link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"></head><body><div id="swagger-ui"></div><script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script><script>SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});</script></body></html>`);
+  }
+  if (method === 'GET' && url.pathname === '/reset-password') {
+    const token = JSON.stringify(url.searchParams.get('token') || '');
+    return sendHtml(res, 200, `<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Đặt lại mật khẩu - PCBUILD LOCAL</title>
+<style>body{font-family:Arial,sans-serif;background:#070a0f;color:#fff;display:grid;place-items:center;min-height:100vh;margin:0}
+main{width:min(390px,calc(100% - 40px));background:#101820;padding:28px;border-radius:16px;box-sizing:border-box}
+h1{font-size:22px;text-align:center}.mint{color:#63e6be}label{display:block;margin-top:16px;color:#a8b4c0}
+input{width:100%;box-sizing:border-box;padding:13px;margin-top:7px;border:1px solid #33404d;border-radius:10px;background:#0c121a;color:#fff}
+button{width:100%;margin-top:22px;padding:14px;border:0;border-radius:10px;background:#63e6be;color:#07100e;font-weight:bold;cursor:pointer}
+#message{margin-top:16px;line-height:1.4}</style></head>
+<body><main><h1 class="mint">ĐẶT LẠI MẬT KHẨU</h1>
+<label>Mật khẩu mới<input id="password" type="password" minlength="8"></label>
+<label>Nhập lại mật khẩu<input id="confirmation" type="password" minlength="8"></label>
+<button id="submit">CẬP NHẬT MẬT KHẨU</button><div id="message"></div>
+<script>
+const token=${token}; const message=document.getElementById('message');
+document.getElementById('submit').onclick=async()=>{const password=document.getElementById('password').value;
+const confirmation=document.getElementById('confirmation').value;
+if(password.length<8||password!==confirmation){message.textContent='Mật khẩu phải có ít nhất 8 ký tự và hai ô phải giống nhau.';return;}
+const response=await fetch('/api/v1/auth/reset-password',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token,password})});
+const data=await response.json(); message.textContent=data.message||'Đã xảy ra lỗi.';
+if(response.ok) document.getElementById('submit').disabled=true;};
+</script></main></body></html>`);
+  }
 
   let body;
   try { if (method !== 'GET' && method !== 'DELETE') body = await readBody(req); } catch (error) { return send(res, 400, { error: 'BAD_REQUEST', message: error.message }); }
@@ -133,11 +257,54 @@ async function route(req, res) {
     const hash = crypto.createHash('sha256').update(body.password || '').digest('hex');
     const user = db.users.find((item) => item.email.toLowerCase() === email && item.passwordHash === hash);
     if (!user) return send(res, 401, { error: 'INVALID_CREDENTIALS', message: 'Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy đăng ký trước.' });
-    const token = crypto.randomBytes(32).toString('hex'); tokens.set(token, user.id); return send(res, 200, { accessToken: token, user: publicUser(user) });
+    return send(res, 200, { accessToken: createAccessToken(user), tokenType: 'Bearer', expiresIn: JWT_EXPIRES_IN, user: publicUser(user) });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/auth/forgot-password') {
-    if (!String(body.email || '').includes('@')) return send(res, 422, { error: 'INVALID_EMAIL', message: 'Email không hợp lệ.' });
+    const email = String(body.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) return send(res, 422, { error: 'INVALID_EMAIL', message: 'Email không hợp lệ.' });
+    const user = db.users.find((item) => item.email.toLowerCase() === email);
+    if (!user) return send(res, 202, { accepted: true, message: 'Nếu email tồn tại, hướng dẫn khôi phục đã được gửi.' });
+    const token = crypto.randomBytes(32).toString('base64url');
+    db.passwordResetTokens = db.passwordResetTokens.filter(
+      (item) => item.userId !== user.id && item.expiresAt > Date.now()
+    );
+    db.passwordResetTokens.push({
+      tokenHash: resetTokenHash(token),
+      userId: user.id,
+      expiresAt: Date.now() + RESET_TOKEN_TTL_MS,
+      usedAt: null,
+    });
+    saveDb();
+    try {
+      await sendPasswordResetEmail(user, token);
+    } catch (error) {
+      db.passwordResetTokens = db.passwordResetTokens.filter(
+        (item) => item.tokenHash !== resetTokenHash(token)
+      );
+      saveDb();
+      return send(res, 503, { error: 'SMTP_UNAVAILABLE', message: `Không thể gửi email khôi phục: ${error.message}` });
+    }
     return send(res, 202, { accepted: true, message: 'Nếu email tồn tại, hướng dẫn khôi phục đã được gửi.' });
+  }
+  if (method === 'POST' && parts.join('/') === 'api/v1/auth/reset-password') {
+    const token = String(body.token || '');
+    const password = String(body.password || '');
+    if (!token || password.length < 8) {
+      return send(res, 422, { error: 'INVALID_RESET_REQUEST', message: 'Token hợp lệ và mật khẩu mới tối thiểu 8 ký tự là bắt buộc.' });
+    }
+    const record = db.passwordResetTokens.find(
+      (item) => item.tokenHash === resetTokenHash(token) && !item.usedAt
+    );
+    if (!record || record.expiresAt <= Date.now()) {
+      return send(res, 400, { error: 'RESET_TOKEN_INVALID', message: 'Liên kết khôi phục không hợp lệ hoặc đã hết hạn.' });
+    }
+    const user = db.users.find((item) => item.id === record.userId);
+    if (!user) return send(res, 400, { error: 'RESET_TOKEN_INVALID', message: 'Liên kết khôi phục không hợp lệ hoặc đã hết hạn.' });
+    user.passwordHash = crypto.createHash('sha256').update(password).digest('hex');
+    record.usedAt = Date.now();
+    db.passwordResetTokens = db.passwordResetTokens.filter((item) => item !== record);
+    saveDb();
+    return send(res, 200, { ok: true, message: 'Đã cập nhật mật khẩu. Bạn có thể đăng nhập lại.' });
   }
   if (method === 'GET' && parts.join('/') === 'api/v1/areas') return send(res, 200, db.areas);
   if (method === 'POST' && parts.join('/') === 'api/v1/location/resolve') {
@@ -198,9 +365,30 @@ async function route(req, res) {
     if (!build) return send(res, 404, { error: 'BUILD_NOT_FOUND' });
     if (method === 'GET') return send(res, 200, buildView(build));
     if (method === 'DELETE') { db.builds = db.builds.filter((item) => item !== build); saveDb(); return send(res, 204, {}); }
+    if (method === 'PUT' && parts.length === 4) {
+      if (body.name !== undefined) {
+        const name = String(body.name).trim();
+        if (name.length < 2) return send(res, 422, { error: 'INVALID_BUILD_NAME', message: 'Tên cấu hình phải có ít nhất 2 ký tự.' });
+        build.name = name;
+      }
+      if (body.budget !== undefined) build.budget = money(body.budget);
+      if (body.areaId !== undefined) build.areaId = String(body.areaId);
+      saveDb();
+      return send(res, 200, buildView(build));
+    }
     if (method === 'PUT' && parts[4] === 'components' && parts[5]) {
-      if (!product(body.productId) || product(body.productId).type !== parts[5]) return send(res, 422, { error: 'INVALID_COMPONENT' });
-      build.components[parts[5]] = body.productId; saveDb(); return send(res, 200, buildView(build));
+      const componentType = decodePathPart(parts[5]);
+      if (body.productId === null || body.productId === undefined || body.productId === '') {
+        delete build.components[componentType];
+        saveDb();
+        return send(res, 200, buildView(build));
+      }
+      if (!product(body.productId) || product(body.productId).type !== componentType) {
+        return send(res, 422, { error: 'INVALID_COMPONENT', message: `Sản phẩm không thuộc loại ${componentType}.` });
+      }
+      build.components[componentType] = body.productId;
+      saveDb();
+      return send(res, 200, buildView(build));
     }
     if (method === 'POST' && parts[4] === 'check') return send(res, 200, compatibility(build.components));
   }

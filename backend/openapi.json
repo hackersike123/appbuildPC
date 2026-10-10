@@ -1,0 +1,127 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PCBUILD LOCAL API",
+    "version": "1.0.0",
+    "description": "JWT protected API for PC configurations."
+  },
+  "servers": [{ "url": "/" }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    },
+    "schemas": {
+      "Credentials": {
+        "type": "object",
+        "required": ["email", "password"],
+        "properties": {
+          "email": { "type": "string", "format": "email" },
+          "password": { "type": "string", "format": "password", "minLength": 8 }
+        }
+      },
+      "Build": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "budget": { "type": "integer" },
+          "areaId": { "type": "string" },
+          "components": { "type": "object" },
+          "totalPrice": { "type": "integer" },
+          "completion": { "type": "integer" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": { "summary": "Health check", "responses": { "200": { "description": "API is running" } } }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "summary": "Create an account",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Credentials" } } } },
+        "responses": { "201": { "description": "Created" }, "409": { "description": "Email exists" } }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "summary": "Login and receive a JWT",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Credentials" } } } },
+        "responses": { "200": { "description": "JWT returned" }, "401": { "description": "Invalid credentials" } }
+      }
+    },
+    "/api/v1/auth/forgot-password": {
+      "post": {
+        "summary": "Send a one-time password reset email",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["email"], "properties": { "email": { "type": "string", "format": "email" } } } } } },
+        "responses": { "202": { "description": "Request accepted" }, "422": { "description": "Invalid email" }, "503": { "description": "SMTP unavailable" } }
+      }
+    },
+    "/api/v1/auth/reset-password": {
+      "post": {
+        "summary": "Set a new password using a one-time token",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["token", "password"], "properties": { "token": { "type": "string" }, "password": { "type": "string", "format": "password", "minLength": 8 } } } } } },
+        "responses": { "200": { "description": "Password updated" }, "400": { "description": "Invalid or expired token" }, "422": { "description": "Invalid request" } }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "summary": "Current user",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "User profile" }, "401": { "description": "Unauthorized" } }
+      }
+    },
+    "/api/v1/builds": {
+      "get": {
+        "summary": "List the current user's builds",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "Build list" } }
+      },
+      "post": {
+        "summary": "Create a build",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Build" } } } },
+        "responses": { "201": { "description": "Build created" } }
+      }
+    },
+    "/api/v1/builds/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "get": {
+        "summary": "Get one build",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "Build" }, "404": { "description": "Not found" } }
+      },
+      "put": {
+        "summary": "Update build metadata",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Build" } } } },
+        "responses": { "200": { "description": "Updated build" }, "404": { "description": "Not found" } }
+      },
+      "delete": {
+        "summary": "Delete one build",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "204": { "description": "Deleted" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/v1/builds/{id}/components/{type}": {
+      "put": {
+        "summary": "Add or replace a component",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "type", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["productId"], "properties": { "productId": { "type": "string", "nullable": true, "description": "Product ID to add/replace; null removes this component." } } } } } },
+        "responses": { "200": { "description": "Updated build" } }
+      }
+    },
+    "/api/v1/notifications": {
+      "get": {
+        "summary": "List notifications",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "Notifications" } }
+      }
+    }
+  }
+}

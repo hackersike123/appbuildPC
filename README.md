@@ -1,9 +1,8 @@
 # PCBUILD LOCAL
 
 Ứng dụng Flutter hỗ trợ xây dựng cấu hình PC theo khu vực, tham khảo giá linh
-kiện, kiểm tra tương thích, quét linh kiện và tư vấn cấu hình. Hiện tại đây là
-bản demo UI/UX chạy chung trên Web và Android; dữ liệu tài khoản, sản phẩm,
-giá, scanner và chatbot vẫn là dữ liệu mô phỏng cục bộ.
+kiện, kiểm tra tương thích, quét linh kiện và tư vấn cấu hình. Web và Android
+dùng chung REST API Node.js; tài khoản và build được phân quyền bằng JWT.
 
 ## Tính năng hiện có
 
@@ -71,11 +70,12 @@ các phần mở rộng tiếp theo.
 
 Xem thêm [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## API demo
+## API và public demo
 
 ```bash
 cd backend
 npm start
 ```
 
-Xem danh sách endpoint và giới hạn tại [backend/README.md](backend/README.md).
+Swagger UI: `http://localhost:3000/docs`. Hướng dẫn JWT, CRUD, VS Code Port
+Forwarding và Gmail SMTP tại [backend/README.md](backend/README.md).

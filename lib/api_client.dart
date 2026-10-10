@@ -37,7 +37,7 @@ class ApiClient {
   }) async {
     final headers = <String, String>{'content-type': 'application/json'};
     if (auth && token != null) {
-      headers['authorization'] = 'Bearer $token';
+      headers['authorization'] = 'Bearer ${token!}';
     }
     final request = http.Request(method, Uri.parse('$baseUrl$path'))
       ..headers.addAll(headers);
@@ -99,6 +99,31 @@ class ApiClient {
         body: {'email': email},
       ),
     );
+  }
+
+  Future<Map<String, dynamic>> resetPassword(
+    String token,
+    String password,
+  ) async {
+    return Map<String, dynamic>.from(
+      await _request(
+        'POST',
+        '/api/v1/auth/reset-password',
+        body: {'token': token, 'password': password},
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> me() async {
+    final data = await _request('GET', '/api/v1/auth/me', auth: true);
+    currentUser = Map<String, dynamic>.from(data as Map);
+    return currentUser!;
+  }
+
+  void logout() {
+    token = null;
+    currentUser = null;
+    buildId = null;
   }
 
   Future<List<Map<String, dynamic>>> notifications() async {
@@ -169,19 +194,52 @@ class ApiClient {
         .toList();
   }
 
+  Future<Map<String, dynamic>> getBuild(String id) async {
+    return Map<String, dynamic>.from(
+      await _request('GET', '/api/v1/builds/$id', auth: true),
+    );
+  }
+
+  Future<void> deleteBuild(String id) async {
+    await _request('DELETE', '/api/v1/builds/$id', auth: true);
+    if (buildId == id) buildId = null;
+  }
+
   Future<Map<String, dynamic>> updateComponent(
     String type,
-    String productId,
+    String? productId,
   ) async {
     if (buildId == null) await createBuild();
-    return Map<String, dynamic>.from(
+    final data = Map<String, dynamic>.from(await _request(
+      'PUT',
+      '/api/v1/builds/$buildId/components/${Uri.encodeComponent(type)}',
+      auth: true,
+      body: {'productId': productId},
+    ));
+    buildId = data['id'] as String? ?? buildId;
+    return data;
+  }
+
+  Future<Map<String, dynamic>> updateBuild(
+    String id, {
+    String? name,
+    int? budget,
+    String? areaId,
+  }) async {
+    final body = <String, dynamic>{};
+    if (name != null) body['name'] = name;
+    if (budget != null) body['budget'] = budget;
+    if (areaId != null) body['areaId'] = areaId;
+    final data = Map<String, dynamic>.from(
       await _request(
         'PUT',
-        '/api/v1/builds/$buildId/components/${Uri.encodeComponent(type)}',
+        '/api/v1/builds/$id',
         auth: true,
-        body: {'productId': productId},
+        body: body,
       ),
     );
+    buildId = data['id'] as String? ?? buildId;
+    return data;
   }
 
   Future<Map<String, dynamic>> checkBuild(

@@ -148,7 +148,108 @@ class PcBuildApp extends StatelessWidget {
         ),
       ),
     ),
-    home: const WelcomeScreen(),
+    home: Uri.base.queryParameters['token']?.isNotEmpty == true
+        ? ResetPasswordScreen(token: Uri.base.queryParameters['token']!)
+        : const WelcomeScreen(),
+  );
+}
+
+class ResetPasswordScreen extends StatefulWidget {
+  const ResetPasswordScreen({super.key, required this.token});
+  final String token;
+
+  @override
+  State<ResetPasswordScreen> createState() => _ResetPasswordScreenState();
+}
+
+class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
+  final password = TextEditingController();
+  final confirmation = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    password.dispose();
+    confirmation.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reset() async {
+    if (busy) return;
+    if (password.text.length < 8 || password.text != confirmation.text) {
+      showDemoMessage(
+        context,
+        'Mật khẩu phải có ít nhất 8 ký tự và hai ô phải giống nhau.',
+      );
+      return;
+    }
+    setState(() => busy = true);
+    try {
+      await ApiClient.instance.resetPassword(widget.token, password.text);
+      if (!mounted) return;
+      showDemoMessage(context, 'Đã đổi mật khẩu. Bạn có thể đăng nhập.');
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+    } on ApiException catch (error) {
+      if (mounted) showDemoMessage(context, error.message);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: bg,
+    body: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 390),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Icon(Icons.lock_reset, color: mint, size: 48),
+              const SizedBox(height: 18),
+              const Text(
+                'ĐẶT LẠI MẬT KHẨU',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 24),
+              TextField(
+                controller: password,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Mật khẩu mới',
+                  prefixIcon: Icon(Icons.lock_outline),
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: confirmation,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Nhập lại mật khẩu mới',
+                  prefixIcon: Icon(Icons.lock_outline),
+                ),
+              ),
+              const SizedBox(height: 20),
+              PrimaryButton(
+                text: busy ? 'ĐANG CẬP NHẬT...' : 'ĐẶT LẠI MẬT KHẨU',
+                onPressed: _reset,
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
   );
 }
 
@@ -1191,7 +1292,8 @@ class _HomeTabState extends State<HomeTab> {
 }
 
 class BuildTab extends StatefulWidget {
-  const BuildTab({super.key});
+  const BuildTab({super.key, this.initialBuild});
+  final Map<String, dynamic>? initialBuild;
   @override
   State<BuildTab> createState() => _BuildTabState();
 }
@@ -1219,8 +1321,50 @@ class _BuildTabState extends State<BuildTab> {
     'CASE': 1.19,
     'TẢN NHIỆT': 0,
   };
+  final defaultProductIds = const <String, String>{
+    'CPU': 'cpu-7600',
+    'MAINBOARD': 'mb-b650m',
+    'RAM': 'ram-32-ddr5',
+    'SSD': 'ssd-sn770',
+    'CASE': 'case-air-100',
+  };
   bool get isComplete =>
       selected.values.every((value) => !value.startsWith('Chọn'));
+  String get _buildTitle =>
+      widget.initialBuild?['name']?.toString() ?? 'Gaming 20 triệu';
+  String get _buildSubtitle {
+    final areaId = widget.initialBuild?['areaId']?.toString();
+    const areas = {
+      'hcm': 'TP. Hồ Chí Minh',
+      'hanoi': 'Hà Nội',
+      'danang': 'Đà Nẵng',
+    };
+    final area = areas[areaId] ?? 'Khu vực hiện tại';
+    return '${selectedIds.length}/8 linh kiện • $area';
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final build = widget.initialBuild;
+    if (build == null) {
+      ApiClient.instance.buildId = null;
+      selectedIds.addAll(defaultProductIds);
+      return;
+    }
+    ApiClient.instance.buildId = build['id'] as String?;
+    final components = build['components'];
+    if (components is! Map) return;
+    for (final entry in components.entries) {
+      final type = entry.key.toString();
+      final item = entry.value;
+      if (item is Map) {
+        selected[type] = item['name']?.toString() ?? selected[type]!;
+        prices[type] = ((item['price'] as num?)?.toDouble() ?? 0) / 1000000;
+        selectedIds[type] = item['id']?.toString() ?? '';
+      }
+    }
+  }
 
   Future<void> _choose(String type) async {
     final result = await Navigator.push<(String, double)>(
@@ -1238,17 +1382,107 @@ class _BuildTabState extends State<BuildTab> {
         prices[type] = result.$2;
         saved = false;
       });
+      if (ApiClient.instance.token == null) {
+        if (mounted) {
+          showDemoMessage(
+            context,
+            'Đã chọn tạm. Hãy đăng nhập để đồng bộ linh kiện vào tài khoản.',
+          );
+        }
+        return;
+      }
       final productId = ApiClient.instance.productIdsByName[result.$1];
-      if (productId != null && ApiClient.instance.token != null) {
-        selectedIds[type] = productId;
-        try {
-          await ApiClient.instance.updateComponent(type, productId);
-        } catch (error) {
-          if (mounted) {
-            showDemoMessage(context, 'Chưa đồng bộ được linh kiện: $error');
-          }
+      if (productId == null || productId.isEmpty) {
+        if (mounted) {
+          showDemoMessage(context, 'Sản phẩm chưa có mã API hợp lệ.');
+        }
+        return;
+      }
+      selectedIds[type] = productId;
+      try {
+        await ApiClient.instance.updateComponent(type, productId);
+      } catch (error) {
+        if (mounted) {
+          showDemoMessage(context, 'Chưa đồng bộ được linh kiện: $error');
         }
       }
+    }
+  }
+
+  Future<void> _removeComponent(String type) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Xóa linh kiện?'),
+        content: Text('Bạn muốn gỡ bỏ $type khỏi cấu hình này?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Hủy'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Xóa', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      if (ApiClient.instance.token == null ||
+          ApiClient.instance.buildId == null) {
+        if (mounted) {
+          showDemoMessage(context, 'Hãy lưu cấu hình trước khi xóa linh kiện.');
+        }
+        return;
+      }
+      try {
+        await ApiClient.instance.updateComponent(type, null);
+        if (!mounted) return;
+        setState(() {
+          selected[type] = 'Chọn $type';
+          prices[type] = 0;
+          selectedIds.remove(type);
+          saved = false;
+        });
+        showDemoMessage(context, 'Đã gỡ bỏ $type khỏi cấu hình.');
+      } catch (error) {
+        if (mounted) {
+          showDemoMessage(context, 'Lỗi khi xóa linh kiện: $error');
+        }
+      }
+    }
+  }
+
+  Future<void> _deleteCurrentBuild() async {
+    final id = widget.initialBuild?['id']?.toString();
+    if (id == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Xóa cấu hình?'),
+        content: const Text('Cấu hình này sẽ bị xóa khỏi tài khoản.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Hủy'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Xóa'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await ApiClient.instance.deleteBuild(id);
+      if (mounted) {
+        showDemoMessage(context, 'Đã xóa cấu hình.');
+        Navigator.pop(context, true);
+      }
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không thể xóa cấu hình: $error');
     }
   }
 
@@ -1257,44 +1491,68 @@ class _BuildTabState extends State<BuildTab> {
     return '${total.toStringAsFixed(2).replaceAll('.', ',')}tr';
   }
 
+  Future<void> _saveBuild() async {
+    if (ApiClient.instance.token == null) {
+      showDemoMessage(context, 'Hãy đăng nhập để lưu cấu hình vào tài khoản.');
+      return;
+    }
+    try {
+      if (ApiClient.instance.buildId == null) {
+        await ApiClient.instance.createBuild();
+      }
+      for (final entry in selectedIds.entries) {
+        if (entry.value.isNotEmpty) {
+          await ApiClient.instance.updateComponent(entry.key, entry.value);
+        }
+      }
+      if (!mounted) return;
+      setState(() => saved = true);
+      showDemoMessage(context, 'Đã lưu đầy đủ cấu hình lên tài khoản.');
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không thể lưu cấu hình: $error');
+    }
+  }
+
+  Future<void> _openAddComponent() async {
+    final type = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Chọn loại linh kiện'),
+        children: selected.keys
+            .map(
+              (type) => SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, type),
+                child: Text(type),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (type != null && mounted) await _choose(type);
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
-    title: 'Gaming 20 triệu',
-    subtitle: '5/8 linh kiện • TP. Hồ Chí Minh',
-    action: TextButton.icon(
-      onPressed: () async {
-        if (!isComplete) {
-          showDemoMessage(
-            context,
-            'Hãy chọn đủ GPU, PSU và tản nhiệt trước khi lưu.',
-          );
-          return;
-        }
-        if (ApiClient.instance.token != null) {
-          try {
-            if (ApiClient.instance.buildId == null) {
-              await ApiClient.instance.createBuild();
-            }
-          } catch (error) {
-            if (mounted) {
-              showDemoMessage(context, 'Không thể lưu build: $error');
-            }
-            return;
-          }
-        }
-        setState(() => saved = true);
-        showDemoMessage(
-          context,
-          ApiClient.instance.token == null
-              ? 'Hãy đăng nhập để lưu build vào tài khoản.'
-              : 'Đã lưu cấu hình lên PCBUILD API.',
-        );
-      },
-      icon: Icon(saved ? Icons.check : Icons.bookmark_border, color: mint),
-      label: Text(
-        saved ? 'Đã lưu' : 'Lưu',
-        style: const TextStyle(color: mint),
-      ),
+    title: _buildTitle,
+    subtitle: _buildSubtitle,
+    action: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TextButton.icon(
+          onPressed: _saveBuild,
+          icon: Icon(saved ? Icons.check : Icons.bookmark_border, color: mint),
+          label: Text(
+            saved ? 'Đã lưu' : 'Lưu',
+            style: const TextStyle(color: mint),
+          ),
+        ),
+        if (widget.initialBuild != null)
+          IconButton(
+            tooltip: 'Xóa cấu hình',
+            onPressed: _deleteCurrentBuild,
+            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+          ),
+      ],
     ),
     child: SafeArea(
       child: ListView(
@@ -1319,6 +1577,9 @@ class _BuildTabState extends State<BuildTab> {
                   ? '–'
                   : '${prices[item.key]!.toStringAsFixed(2).replaceAll('.', ',')}tr',
               onTap: () => _choose(item.key),
+              onDelete: item.value.startsWith('Chọn')
+                  ? null
+                  : () => _removeComponent(item.key),
             ),
           ),
           const SizedBox(height: 18),
@@ -1346,13 +1607,7 @@ class _BuildTabState extends State<BuildTab> {
             ],
           ),
           const SizedBox(height: 12),
-          PrimaryButton(
-            text: '+ Thêm linh kiện',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const ProductListScreen()),
-            ),
-          ),
+          PrimaryButton(text: '+ Thêm linh kiện', onPressed: _openAddComponent),
           const SizedBox(height: 10),
           SecondaryButton(
             text: 'Kiểm tra tương thích',
@@ -1796,61 +2051,127 @@ class _ChatTabState extends State<ChatTab> {
   }
 }
 
-class SavedTab extends StatelessWidget {
+class SavedTab extends StatefulWidget {
   const SavedTab({super.key});
+  @override
+  State<SavedTab> createState() => _SavedTabState();
+}
+
+class _SavedTabState extends State<SavedTab> {
+  late Future<List<Map<String, dynamic>>> buildsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    buildsFuture = ApiClient.instance.builds();
+  }
+
+  Future<void> _deleteBuild(Map<String, dynamic> build) async {
+    final id = build['id']?.toString();
+    if (id == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Xóa cấu hình?'),
+        content: Text(
+          'Bạn có muốn xóa "${build['name'] ?? 'cấu hình'}" không?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Hủy'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Xóa'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await ApiClient.instance.deleteBuild(id);
+      if (mounted) {
+        setState(() => buildsFuture = ApiClient.instance.builds());
+        showDemoMessage(context, 'Đã xóa cấu hình khỏi tài khoản.');
+      }
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không thể xóa cấu hình: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Cấu hình đã lưu',
-    subtitle: '3 build được đồng bộ với tài khoản',
+    subtitle: 'Cấu hình được đồng bộ với tài khoản',
     action: TextButton.icon(
-      onPressed: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const BuildTab()),
-      ),
+      onPressed: () =>
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const BuildTab()),
+          ).then((_) {
+            if (mounted) {
+              setState(() => buildsFuture = ApiClient.instance.builds());
+            }
+          }),
       icon: const Icon(Icons.add, color: mint, size: 18),
       label: const Text('Tạo mới', style: TextStyle(color: mint)),
     ),
     child: SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
-        children: [
-          const InfoTile(
-            icon: Icons.cloud_done_outlined,
-            text: 'Đã lưu vào tài khoản minh.nguyen@email.com',
-          ),
-          const SizedBox(height: 14),
-          const Wrap(
-            spacing: 8,
+      child: FutureBuilder<List<Map<String, dynamic>>>(
+        future: buildsFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator(color: mint));
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Text('Không tải được cấu hình: ${snapshot.error}'),
+            );
+          }
+          final builds = snapshot.data ?? const <Map<String, dynamic>>[];
+          if (builds.isEmpty) {
+            return const Center(
+              child: Text('Bạn chưa có cấu hình nào được lưu.'),
+            );
+          }
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
             children: [
-              Tag('Tất cả 3'),
-              Tag('Tương thích 2'),
-              Tag('Cảnh báo 1'),
+              InfoTile(
+                icon: Icons.cloud_done_outlined,
+                text:
+                    'Đã lưu vào tài khoản ${ApiClient.instance.currentUser?['email'] ?? ''}',
+              ),
+              const SizedBox(height: 14),
+              Tag('Tất cả ${builds.length}'),
+              const SizedBox(height: 14),
+              ...builds.map(
+                (build) => SavedCard(
+                  name: build['name']?.toString() ?? 'Cấu hình mới',
+                  price:
+                      '${((build['totalPrice'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}đ',
+                  status: (build['completion'] as num? ?? 0) == 100
+                      ? 'TƯƠNG THÍCH'
+                      : 'ĐANG LÀM',
+                  area: build['areaId']?.toString() ?? 'TP. HỒ CHÍ MINH',
+                  onEdit: () =>
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => BuildTab(initialBuild: build),
+                        ),
+                      ).then(
+                        (_) => setState(
+                          () => buildsFuture = ApiClient.instance.builds(),
+                        ),
+                      ),
+                  onDelete: () => _deleteBuild(build),
+                ),
+              ),
             ],
-          ),
-          const SizedBox(height: 14),
-          ...[
-            [
-              'Gaming 2K • Ryzen 5',
-              '22.410.000đ',
-              'TƯƠNG THÍCH',
-              'TP. HỒ CHÍ MINH',
-            ],
-            ['Workstation Creator', '48.790.000đ', '1 CẢNH BÁO', 'HÀ NỘI'],
-            ['Esports tiết kiệm', '11.280.000đ', 'TƯƠNG THÍCH', 'ĐÀ NẴNG'],
-          ].map(
-            (item) => SavedCard(
-              name: item[0],
-              price: item[1],
-              status: item[2],
-              area: item[3],
-            ),
-          ),
-          const SizedBox(height: 10),
-          const InfoTile(
-            text: 'So với giá TP.HCM',
-            trailing: 'Hà Nội +2,4% • Đà Nẵng +1,1%',
-          ),
-        ],
+          );
+        },
       ),
     ),
   );
@@ -2318,11 +2639,13 @@ class ComponentRow extends StatelessWidget {
     required this.name,
     required this.price,
     this.onTap,
+    this.onDelete,
   });
   final String type;
   final String name;
   final String price;
   final VoidCallback? onTap;
+  final VoidCallback? onDelete;
   @override
   Widget build(BuildContext context) {
     final empty = name.startsWith('Kéo') || name.startsWith('Chọn');
@@ -2357,7 +2680,28 @@ class ComponentRow extends StatelessWidget {
                 ],
               ),
             ),
-            Text(price, style: const TextStyle(color: mint, fontSize: 12)),
+            if (!empty)
+              IconButton(
+                icon: const Icon(
+                  Icons.delete_outline,
+                  color: Colors.redAccent,
+                  size: 20,
+                ),
+                onPressed: onDelete,
+                constraints: const BoxConstraints(),
+                padding: EdgeInsets.zero,
+              ),
+            if (!empty)
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Text(
+                  price,
+                  style: const TextStyle(
+                    color: mint,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -2552,11 +2896,15 @@ class SavedCard extends StatelessWidget {
     required this.price,
     required this.status,
     required this.area,
+    this.onEdit,
+    this.onDelete,
   });
   final String name;
   final String price;
   final String status;
   final String area;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
   @override
   Widget build(BuildContext context) => CardBox(
     child: Column(
@@ -2582,11 +2930,26 @@ class SavedCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(price, style: const TextStyle(color: mint, fontSize: 19)),
-            const Row(
+            Row(
               children: [
-                Icon(Icons.copy, size: 18),
-                SizedBox(width: 14),
-                Icon(Icons.more_horiz, size: 18),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: onEdit,
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Sửa'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: onDelete,
+                    icon: const Icon(Icons.delete_outline, size: 16),
+                    label: const Text('Xóa'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.redAccent,
+                    ),
+                  ),
+                ),
               ],
             ),
           ],
