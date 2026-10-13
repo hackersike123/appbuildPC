@@ -3,9 +3,12 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'api_client.dart';
+import 'services/lm_studio_service.dart';
 
 void main() => runApp(const PcBuildApp());
 
@@ -19,50 +22,24 @@ const greenPanel = Color(0xff173f38);
 
 Future<bool> requestLocationPermission(BuildContext context) async {
   if (kIsWeb) {
-    if (context.mounted) {
-      showDemoMessage(
-        context,
-        'Web demo dùng khu vực mẫu TP. Hồ Chí Minh; quyền GPS được dùng trên Android.',
-      );
-    }
     return false;
   }
   final status = await Permission.locationWhenInUse.request();
-  if (context.mounted) {
-    showDemoMessage(
-      context,
-      status.isGranted
-          ? 'Đã cấp quyền vị trí. Giá demo vẫn dùng dữ liệu mẫu.'
-          : 'Chưa cấp quyền vị trí. Demo vẫn tiếp tục với TP. Hồ Chí Minh.',
-    );
-  }
   return status.isGranted;
 }
 
 Future<bool> requestCameraPermission(BuildContext context) async {
-  if (kIsWeb) {
-    if (context.mounted) {
-      showDemoMessage(
-        context,
-        'Web demo dùng ảnh mẫu; quyền camera được dùng trên Android.',
-      );
-    }
-    return false;
-  }
+  if (kIsWeb) return true;
   final status = await Permission.camera.request();
-  if (context.mounted) {
-    showDemoMessage(
-      context,
-      status.isGranted
-          ? 'Đã cấp quyền camera. Scanner demo vẫn dùng ảnh mẫu.'
-          : 'Chưa cấp quyền camera. Scanner demo vẫn dùng ảnh mẫu.',
-    );
-  }
   return status.isGranted;
 }
 
-void showDemoMessage(BuildContext context, String message) {
+void showMessage(BuildContext context, String message) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+}
+
+void showDemoMessage(BuildContext context, String message) {
+  showMessage(context, message);
 }
 
 double productPriceInMillions(String value) {
@@ -87,35 +64,6 @@ class Product {
   final String image;
   final bool used;
 }
-
-const products = [
-  Product(
-    'ASUS Dual GeForce RTX 4060 OC 8GB',
-    '8.690.000đ',
-    'MỚI  ·  GEARVN',
-    'assets/figma/gpu1.jpeg',
-  ),
-  Product(
-    'Gigabyte RTX 4060 Windforce OC 8GB',
-    '7.250.000đ',
-    'CŨ 98%  ·  Q.10',
-    'assets/figma/gpu2.png',
-    used: true,
-  ),
-  Product(
-    'MSI RTX 4060 Ventus 2X Black 8G OC',
-    '8.490.000đ',
-    'MỚI  ·  MEMORYZONE',
-    'assets/figma/gpu1.jpeg',
-  ),
-  Product(
-    'Zotac Gaming RTX 3060 Twin Edge 12GB',
-    '5.900.000đ',
-    'CŨ 95%  ·  THỦ ĐỨC',
-    'assets/figma/gpu2.png',
-    used: true,
-  ),
-];
 
 class PcBuildApp extends StatelessWidget {
   const PcBuildApp({super.key});
@@ -369,16 +317,37 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   );
   Future<void> _startWithLocation(BuildContext context) async {
     setState(() => loadingArea = true);
-    await requestLocationPermission(context);
+    Position? position;
     try {
-      final result = await ApiClient.instance.resolveLocation();
+      final granted = await requestLocationPermission(context);
+      if (granted) {
+        position = await Geolocator.getCurrentPosition();
+      }
+      final result = await ApiClient.instance.resolveLocation(
+        lat: position?.latitude,
+        lng: position?.longitude,
+      );
       if (!mounted) return;
       final area = Map<String, dynamic>.from(result['area'] as Map);
       areaId = area['id'] as String;
       areaName = area['name'] as String;
+      showMessage(
+        context,
+        position == null
+            ? 'Không lấy được GPS. Hãy chọn khu vực thủ công.'
+            : 'Đã xác định khu vực theo GPS.',
+      );
       _openLogin();
     } catch (_) {
-      if (mounted) _openLogin();
+      if (mounted) {
+        showMessage(
+          context,
+          position == null
+              ? 'Không lấy được GPS. Hãy chọn khu vực thủ công.'
+              : 'Đã xác định khu vực theo GPS.',
+        );
+        _openLogin();
+      }
     } finally {
       if (mounted) setState(() => loadingArea = false);
     }
@@ -548,7 +517,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 password.text.length < 6) {
                               showDemoMessage(
                                 context,
-                                'Demo yêu cầu email hợp lệ và mật khẩu từ 6 ký tự.',
+                                'Email hợp lệ và mật khẩu tối thiểu 8 ký tự là bắt buộc.',
                               );
                               return;
                             }
@@ -586,21 +555,6 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             );
                           },
-                  ),
-                  const SizedBox(height: 20),
-                  const Center(
-                    child: Text(
-                      'HOẶC TIẾP TỤC VỚI',
-                      style: TextStyle(color: Color(0xff596574), fontSize: 11),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  SecondaryButton(
-                    text: 'Google',
-                    onPressed: () => showDemoMessage(
-                      context,
-                      'Đăng nhập Google chưa được cấu hình cho bản demo này.',
-                    ),
                   ),
                   Center(
                     child: TextButton(
@@ -935,6 +889,7 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int tab = 0;
+  int savedVersion = 0;
   late String areaId = widget.areaId;
   late String areaName = widget.areaName;
   @override
@@ -944,6 +899,7 @@ class _MainScreenState extends State<MainScreen> {
       children: [
         HomeTab(
           onOpen: _open,
+          onTabOpen: _switchTab,
           areaId: areaId,
           areaName: areaName,
           onAreaChanged: (id, name) => setState(() {
@@ -952,56 +908,71 @@ class _MainScreenState extends State<MainScreen> {
           }),
         ),
         const BuildTab(),
-        const SavedTab(),
+        SavedTab(key: ValueKey(savedVersion)),
         const ChatTab(),
         const AccountTab(),
       ],
     ),
-    bottomNavigationBar: NavigationBar(
-      selectedIndex: tab,
-      onDestinationSelected: (value) => setState(() => tab = value),
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.home_outlined),
-          selectedIcon: Icon(Icons.home),
-          label: 'Trang chủ',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.memory_outlined),
-          selectedIcon: Icon(Icons.memory),
-          label: 'Build',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.bookmark_border),
-          selectedIcon: Icon(Icons.bookmark),
-          label: 'Đã lưu',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.chat_bubble_outline),
-          selectedIcon: Icon(Icons.chat_bubble),
-          label: 'Tư vấn',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.person_outline),
-          selectedIcon: Icon(Icons.person),
-          label: 'Tài khoản',
-        ),
-      ],
+    bottomNavigationBar: SizedBox(
+      height: 72,
+      child: NavigationBar(
+        backgroundColor: panel,
+        indicatorColor: Colors.transparent,
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+        selectedIndex: tab,
+        onDestinationSelected: _switchTab,
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home),
+            label: 'Trang chủ',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.memory_outlined),
+            selectedIcon: Icon(Icons.memory),
+            label: 'Build',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.bookmark_border),
+            selectedIcon: Icon(Icons.bookmark),
+            label: 'Đã lưu',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.chat_bubble_outline),
+            selectedIcon: Icon(Icons.chat_bubble),
+            label: 'Tư vấn',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.person_outline),
+            selectedIcon: Icon(Icons.person),
+            label: 'Tài khoản',
+          ),
+        ],
+      ),
     ),
   );
   void _open(Widget page) =>
       Navigator.push(context, MaterialPageRoute(builder: (_) => page));
+
+  void _switchTab(int value) {
+    setState(() {
+      tab = value;
+      if (value == 2) savedVersion++;
+    });
+  }
 }
 
 class HomeTab extends StatefulWidget {
   const HomeTab({
     super.key,
     required this.onOpen,
+    required this.onTabOpen,
     required this.onAreaChanged,
     this.areaId = 'hcm',
     this.areaName = 'TP. Hồ Chí Minh',
   });
   final void Function(Widget) onOpen;
+  final void Function(int) onTabOpen;
   final String areaId;
   final String areaName;
   final void Function(String id, String name) onAreaChanged;
@@ -1015,6 +986,7 @@ class _HomeTabState extends State<HomeTab> {
   bool loadingMarket = true;
   List<Map<String, dynamic>> marketItems = const [];
   String? marketError;
+  String? marketUpdatedAt;
   Map<String, dynamic>? activeBuild;
   bool loadingBuild = true;
   List<Map<String, dynamic>> notifications = const [];
@@ -1157,6 +1129,7 @@ class _HomeTabState extends State<HomeTab> {
       if (!mounted) return;
       setState(() {
         marketItems = items;
+        marketUpdatedAt = result['updatedAt']?.toString();
         marketError = null;
         loadingMarket = false;
       });
@@ -1228,15 +1201,27 @@ class _HomeTabState extends State<HomeTab> {
             onTap: _changeArea,
             child: InfoTile(
               icon: Icons.location_on_outlined,
-              text: 'GIÁ THỊ TRƯỜNG TẠI\n$currentAreaName • API',
+              text: '$currentAreaName • GPS',
               trailing: 'Thay đổi',
             ),
+          ),
+          const SizedBox(height: 16),
+          InfoTile(
+            icon: Icons.check_circle_outline,
+            text:
+                'Giá thị trường tại $currentAreaName\nNguồn: giá chào bán mẫu • ${marketUpdatedAt == null ? 'đang tải thời điểm cập nhật' : 'cập nhật ${marketUpdatedAt!.replaceFirst('T', ' ').split('.').first}'}',
           ),
           const SizedBox(height: 16),
           MarketCard(
             items: marketItems,
             loading: loadingMarket,
             error: marketError,
+            onTap: () => widget.onOpen(
+              MarketChangesScreen(
+                areaName: currentAreaName,
+                items: marketItems,
+              ),
+            ),
           ),
           const SizedBox(height: 18),
           Row(
@@ -1264,7 +1249,7 @@ class _HomeTabState extends State<HomeTab> {
               QuickCard(
                 icon: Icons.memory,
                 text: 'Build PC',
-                onTap: () => widget.onOpen(const BuildTab()),
+                onTap: () => widget.onTabOpen(1),
               ),
               QuickCard(
                 icon: Icons.camera_alt_outlined,
@@ -1274,17 +1259,31 @@ class _HomeTabState extends State<HomeTab> {
               QuickCard(
                 icon: Icons.scatter_plot,
                 text: 'So giá',
-                onTap: () => widget.onOpen(const ProductListScreen()),
+                onTap: () => widget.onOpen(const CompareProductsScreen()),
               ),
               QuickCard(
                 icon: Icons.chat_bubble_outline,
                 text: 'Tư vấn',
                 onTap: () => widget.onOpen(const ChatTab()),
               ),
+              QuickCard(
+                icon: Icons.category_outlined,
+                text: 'Chọn linh kiện',
+                onTap: () => widget.onTabOpen(1),
+              ),
+              QuickCard(
+                icon: Icons.bookmark_border,
+                text: 'Cấu hình đã lưu',
+                onTap: () => widget.onTabOpen(2),
+              ),
             ],
           ),
           const SizedBox(height: 18),
-          BuildProgress(buildData: activeBuild, loading: loadingBuild),
+          BuildProgress(
+            buildData: activeBuild,
+            loading: loadingBuild,
+            onContinue: activeBuild == null ? null : () => widget.onTabOpen(1),
+          ),
         ],
       ),
     ),
@@ -1300,40 +1299,27 @@ class BuildTab extends StatefulWidget {
 
 class _BuildTabState extends State<BuildTab> {
   bool saved = false;
+  bool loadingBuild = false;
+  Map<String, dynamic>? loadedBuild;
   final selectedIds = <String, String>{};
+  final powers = <String, int>{};
   final selected = <String, String>{
-    'CPU': 'Ryzen 5 7600',
-    'MAINBOARD': 'MSI B650M Gaming Plus',
+    'CPU': 'Chọn CPU',
+    'MAINBOARD': 'Chọn MAINBOARD',
     'GPU': 'Chọn GPU',
-    'RAM': 'Kingston Fury 32GB DDR5',
-    'SSD': 'WD Black SN770 1TB',
+    'RAM': 'Chọn RAM',
+    'SSD': 'Chọn SSD',
     'PSU': 'Chọn nguồn',
-    'CASE': 'Montech Air 100',
+    'CASE': 'Chọn CASE',
     'TẢN NHIỆT': 'Chọn tản nhiệt',
   };
-  final prices = <String, double>{
-    'CPU': 4.89,
-    'MAINBOARD': 3.69,
-    'GPU': 0,
-    'RAM': 2.15,
-    'SSD': 1.89,
-    'PSU': 0,
-    'CASE': 1.19,
-    'TẢN NHIỆT': 0,
-  };
-  final defaultProductIds = const <String, String>{
-    'CPU': 'cpu-7600',
-    'MAINBOARD': 'mb-b650m',
-    'RAM': 'ram-32-ddr5',
-    'SSD': 'ssd-sn770',
-    'CASE': 'case-air-100',
-  };
+  final prices = <String, double>{};
   bool get isComplete =>
       selected.values.every((value) => !value.startsWith('Chọn'));
-  String get _buildTitle =>
-      widget.initialBuild?['name']?.toString() ?? 'Gaming 20 triệu';
+  Map<String, dynamic>? get _currentBuild => widget.initialBuild ?? loadedBuild;
+  String get _buildTitle => _currentBuild?['name']?.toString() ?? 'Build mới';
   String get _buildSubtitle {
-    final areaId = widget.initialBuild?['areaId']?.toString();
+    final areaId = _currentBuild?['areaId']?.toString();
     const areas = {
       'hcm': 'TP. Hồ Chí Minh',
       'hanoi': 'Hà Nội',
@@ -1349,9 +1335,30 @@ class _BuildTabState extends State<BuildTab> {
     final build = widget.initialBuild;
     if (build == null) {
       ApiClient.instance.buildId = null;
-      selectedIds.addAll(defaultProductIds);
+      _loadLatestBuild();
       return;
     }
+    _applyBuild(build);
+  }
+
+  Future<void> _loadLatestBuild() async {
+    if (ApiClient.instance.token == null) return;
+    setState(() => loadingBuild = true);
+    try {
+      final builds = await ApiClient.instance.builds();
+      if (!mounted || builds.isEmpty) return;
+      _applyBuild(builds.first);
+    } catch (error) {
+      if (mounted) {
+        showMessage(context, 'Không tải được cấu hình gần nhất: $error');
+      }
+    } finally {
+      if (mounted) setState(() => loadingBuild = false);
+    }
+  }
+
+  void _applyBuild(Map<String, dynamic> build) {
+    loadedBuild = build;
     ApiClient.instance.buildId = build['id'] as String?;
     final components = build['components'];
     if (components is! Map) return;
@@ -1362,8 +1369,10 @@ class _BuildTabState extends State<BuildTab> {
         selected[type] = item['name']?.toString() ?? selected[type]!;
         prices[type] = ((item['price'] as num?)?.toDouble() ?? 0) / 1000000;
         selectedIds[type] = item['id']?.toString() ?? '';
+        powers[type] = (item['power'] as num?)?.toInt() ?? 0;
       }
     }
+    if (mounted) setState(() {});
   }
 
   Future<void> _choose(String type) async {
@@ -1380,6 +1389,7 @@ class _BuildTabState extends State<BuildTab> {
       setState(() {
         selected[type] = result.$1;
         prices[type] = result.$2;
+        powers[type] = ApiClient.instance.productPowerByName[result.$1] ?? 0;
         saved = false;
       });
       if (ApiClient.instance.token == null) {
@@ -1491,6 +1501,12 @@ class _BuildTabState extends State<BuildTab> {
     return '${total.toStringAsFixed(2).replaceAll('.', ',')}tr';
   }
 
+  int get _estimatedPower =>
+      powers.values.fold<int>(0, (sum, value) => sum + value);
+  int get _recommendedPsu => _estimatedPower == 0
+      ? 0
+      : (((_estimatedPower + 150 + 49) ~/ 50) * 50).clamp(450, 2000);
+
   Future<void> _saveBuild() async {
     if (ApiClient.instance.token == null) {
       showDemoMessage(context, 'Hãy đăng nhập để lưu cấu hình vào tài khoản.');
@@ -1513,24 +1529,6 @@ class _BuildTabState extends State<BuildTab> {
     }
   }
 
-  Future<void> _openAddComponent() async {
-    final type = await showDialog<String>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('Chọn loại linh kiện'),
-        children: selected.keys
-            .map(
-              (type) => SimpleDialogOption(
-                onPressed: () => Navigator.pop(context, type),
-                child: Text(type),
-              ),
-            )
-            .toList(),
-      ),
-    );
-    if (type != null && mounted) await _choose(type);
-  }
-
   @override
   Widget build(BuildContext context) => Shell(
     title: _buildTitle,
@@ -1546,7 +1544,7 @@ class _BuildTabState extends State<BuildTab> {
             style: const TextStyle(color: mint),
           ),
         ),
-        if (widget.initialBuild != null)
+        if (_currentBuild != null)
           IconButton(
             tooltip: 'Xóa cấu hình',
             onPressed: _deleteCurrentBuild,
@@ -1558,22 +1556,28 @@ class _BuildTabState extends State<BuildTab> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 6, 18, 20),
         children: [
-          const ProgressLine(
+          ProgressLine(
             label: 'TIẾN ĐỘ BUILD',
-            value: '62%',
-            progress: .62,
+            value: '${(selectedIds.length / selected.length * 100).round()}%',
+            progress: selectedIds.length / 8,
           ),
-          const ProgressLine(
+          ProgressLine(
             label: 'LƯỢNG ĐIỆN TIÊU THỤ',
-            value: '320W / 650W',
-            progress: .42,
+            value: _estimatedPower == 0
+                ? 'Chưa đủ dữ liệu'
+                : '${_estimatedPower}W / ${_recommendedPsu}W',
+            progress: _recommendedPsu == 0
+                ? 0
+                : (_estimatedPower / _recommendedPsu)
+                      .clamp(0.0, 1.0)
+                      .toDouble(),
             amber: true,
           ),
           ...selected.entries.map(
             (item) => ComponentRow(
               type: item.key,
               name: item.value,
-              price: prices[item.key] == 0
+              price: (prices[item.key] ?? 0) == 0
                   ? '–'
                   : '${prices[item.key]!.toStringAsFixed(2).replaceAll('.', ',')}tr',
               onTap: () => _choose(item.key),
@@ -1607,8 +1611,6 @@ class _BuildTabState extends State<BuildTab> {
             ],
           ),
           const SizedBox(height: 12),
-          PrimaryButton(text: '+ Thêm linh kiện', onPressed: _openAddComponent),
-          const SizedBox(height: 10),
           SecondaryButton(
             text: 'Kiểm tra tương thích',
             onPressed: () async {
@@ -1651,6 +1653,148 @@ class _BuildTabState extends State<BuildTab> {
   );
 }
 
+class MarketChangesScreen extends StatelessWidget {
+  const MarketChangesScreen({
+    super.key,
+    required this.areaName,
+    required this.items,
+  });
+  final String areaName;
+  final List<Map<String, dynamic>> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final changed = items
+        .where((item) => ((item['trend'] as num?)?.toDouble() ?? 0) != 0)
+        .toList();
+    return Shell(
+      title: 'Biến động giá',
+      subtitle: areaName,
+      back: true,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
+        children: [
+          const InfoTile(
+            icon: Icons.trending_up,
+            text: 'Linh kiện có thay đổi giá trong khu vực hiện tại.',
+          ),
+          const SizedBox(height: 12),
+          ...changed.map(
+            (item) => CardBox(
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(item['name']?.toString() ?? 'Linh kiện'),
+                subtitle: Text(
+                  'Giá trước: ${_money(item['previousPrice'])}\nGiá hiện tại: ${_money(item['price'])}',
+                ),
+                trailing: Text(
+                  '${(item['trend'] as num?)?.toStringAsFixed(2)}%',
+                  style: TextStyle(
+                    color: (item['trend'] as num? ?? 0) < 0
+                        ? mint
+                        : Colors.orange,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _money(dynamic value) =>
+      '${((value as num?)?.toDouble() ?? 0).toStringAsFixed(0)}đ';
+}
+
+class CompareProductsScreen extends StatefulWidget {
+  const CompareProductsScreen({super.key});
+  @override
+  State<CompareProductsScreen> createState() => _CompareProductsScreenState();
+}
+
+class _CompareProductsScreenState extends State<CompareProductsScreen> {
+  late Future<List<Map<String, dynamic>>> productsFuture;
+  final selected = <String>{};
+  Map<String, dynamic>? result;
+
+  @override
+  void initState() {
+    super.initState();
+    productsFuture = ApiClient.instance.products('');
+  }
+
+  Future<void> _compare() async {
+    if (selected.length != 2) {
+      showMessage(context, 'Hãy chọn đúng 2 linh kiện để so giá.');
+      return;
+    }
+    try {
+      final response = await ApiClient.instance.compareProducts(
+        selected.toList(),
+      );
+      if (mounted) setState(() => result = response);
+    } catch (error) {
+      if (mounted) showMessage(context, 'Không thể so giá: $error');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Shell(
+    title: 'So giá linh kiện',
+    subtitle: 'Chọn một cặp linh kiện bất kỳ',
+    back: true,
+    child: FutureBuilder<List<Map<String, dynamic>>>(
+      future: productsFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator(color: mint));
+        }
+        final products = snapshot.data!;
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
+          children: [
+            const InfoTile(
+              icon: Icons.compare_arrows,
+              text: 'Không giới hạn loại linh kiện: CPU, GPU, RAM, SSD, nguồn và các loại khác.',
+            ),
+            const SizedBox(height: 12),
+            ...products.map(
+              (item) => CheckboxListTile(
+                value: selected.contains(item['id']),
+                onChanged: (checked) {
+                  setState(() {
+                    if (checked == true && selected.length < 2) {
+                      selected.add(item['id'].toString());
+                    } else if (checked != true) {
+                      selected.remove(item['id']);
+                    }
+                  });
+                },
+                title: Text(item['name'].toString()),
+                subtitle: Text('${item['type']} • ${item['price']}đ'),
+              ),
+            ),
+            PrimaryButton(text: 'So giá 2 linh kiện', onPressed: _compare),
+            if (result != null) ...[
+              const SizedBox(height: 14),
+              ...((result!['products'] as List? ?? const []).map(
+                (item) => CardBox(
+                  child: Text(
+                    '${item['name']}\n${item['type']} • ${item['price']}đ',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              )),
+            ],
+          ],
+        );
+      },
+    ),
+  );
+}
+
 class ProductListScreen extends StatefulWidget {
   const ProductListScreen({
     super.key,
@@ -1665,6 +1809,8 @@ class ProductListScreen extends StatefulWidget {
 
 class _ProductListScreenState extends State<ProductListScreen> {
   late Future<List<Product>> productsFuture;
+  String query = '';
+  int? maxPrice;
 
   @override
   void initState() {
@@ -1674,10 +1820,16 @@ class _ProductListScreenState extends State<ProductListScreen> {
 
   Future<List<Product>> _loadProducts() async {
     try {
-      final data = await ApiClient.instance.products(widget.componentType);
+      final data = await ApiClient.instance.products(
+        widget.componentType,
+        query: query,
+        maxPrice: maxPrice,
+      );
       return data.map((item) {
         final name = item['name'] as String;
         ApiClient.instance.productIdsByName[name] = item['id'] as String;
+        ApiClient.instance.productPowerByName[name] =
+            (item['power'] as num?)?.toInt() ?? 0;
         return Product(
           name,
           '${((item['price'] as num) / 1000000).toStringAsFixed(2).replaceAll('.', ',')}tr',
@@ -1687,10 +1839,17 @@ class _ProductListScreenState extends State<ProductListScreen> {
               : 'assets/figma/gpu2.png',
         );
       }).toList();
-    } catch (_) {
-      if (widget.componentType == 'GPU') return products;
-      return const [];
+    } catch (error) {
+      throw ApiException('Không tải được ${widget.componentType}: $error');
     }
+  }
+
+  void _refreshProducts({String? nextQuery, int? nextMaxPrice}) {
+    setState(() {
+      query = nextQuery ?? query;
+      maxPrice = nextMaxPrice;
+      productsFuture = _loadProducts();
+    });
   }
 
   @override
@@ -1702,21 +1861,26 @@ class _ProductListScreenState extends State<ProductListScreen> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 4, 18, 20),
         children: [
-          const TextField(
+          TextField(
+            onChanged: (value) => _refreshProducts(nextQuery: value),
             decoration: InputDecoration(
               prefixIcon: Icon(Icons.search),
               hintText: 'Tìm RTX 4060, RX 7600...',
-              suffixIcon: Icon(Icons.tune),
+              suffixIcon: const Icon(Icons.search),
             ),
           ),
           const SizedBox(height: 14),
-          const Wrap(
+          Wrap(
             spacing: 8,
             children: [
-              Tag('Tất cả'),
-              Tag('Hàng mới'),
-              Tag('Hàng cũ'),
-              Tag('≤ 10 triệu'),
+              ActionChip(
+                label: const Text('Tất cả'),
+                onPressed: () => _refreshProducts(nextMaxPrice: null),
+              ),
+              ActionChip(
+                label: const Text('≤ 10 triệu'),
+                onPressed: () => _refreshProducts(nextMaxPrice: 10000000),
+              ),
             ],
           ),
           const SizedBox(height: 14),
@@ -1779,7 +1943,59 @@ class ScannerScreen extends StatefulWidget {
 }
 
 class _ScannerScreenState extends State<ScannerScreen> {
-  bool scanned = true;
+  bool scanned = false;
+  XFile? selectedImage;
+  String? analysis;
+  bool analyzing = false;
+
+  Future<void> _pickAndAnalyze(ImageSource source) async {
+    if (source == ImageSource.camera &&
+        !await requestCameraPermission(context)) {
+      return;
+    }
+    final image = await ImagePicker().pickImage(
+      source: source,
+      imageQuality: 85,
+      maxWidth: 1280,
+    );
+    if (image == null || !mounted) return;
+    setState(() {
+      selectedImage = image;
+      analysis = null;
+      analyzing = true;
+      scanned = true;
+    });
+    try {
+      final bytes = await image.readAsBytes();
+      final service = LMStudioService();
+      final models = await service.getModels();
+      if (models.isEmpty) {
+        throw const LMStudioException('Không tìm thấy model Vision.');
+      }
+      final answer = await service.chat(
+        modelId: models.first,
+        prompt:
+            'Hãy nhận diện linh kiện PC trong ảnh bằng tiếng Việt. '
+            'Nêu tên, hãng, model nếu nhìn thấy và chỉ kết luận dựa trên ảnh.',
+        imageBytes: bytes,
+        imageMimeType: image.name.toLowerCase().endsWith('.png')
+            ? 'image/png'
+            : 'image/jpeg',
+      );
+      if (mounted) {
+        setState(() => analysis = answer);
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => ChatTab(initialPrompt: answer)),
+        );
+      }
+    } catch (error) {
+      if (mounted) setState(() => analysis = 'Không thể phân tích ảnh: $error');
+    } finally {
+      if (mounted) setState(() => analyzing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Nhận diện linh kiện',
@@ -1794,12 +2010,29 @@ class _ScannerScreenState extends State<ScannerScreen> {
             borderRadius: BorderRadius.circular(18),
             child: Stack(
               children: [
-                Image.asset(
-                  'assets/figma/scan.jpg',
-                  height: 500,
-                  width: double.infinity,
-                  fit: BoxFit.cover,
-                ),
+                selectedImage == null
+                    ? Image.asset(
+                        'assets/figma/scan.jpg',
+                        height: 500,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                      )
+                    : FutureBuilder(
+                        future: selectedImage!.readAsBytes(),
+                        builder: (context, snapshot) => snapshot.hasData
+                            ? Image.memory(
+                                snapshot.data!,
+                                height: 500,
+                                width: double.infinity,
+                                fit: BoxFit.cover,
+                              )
+                            : const SizedBox(
+                                height: 500,
+                                child: Center(
+                                  child: CircularProgressIndicator(),
+                                ),
+                              ),
+                      ),
                 Positioned.fill(
                   child: Container(
                     decoration: BoxDecoration(
@@ -1808,18 +2041,24 @@ class _ScannerScreenState extends State<ScannerScreen> {
                     ),
                   ),
                 ),
-                const Positioned(
+                Positioned(
                   top: 14,
                   left: 0,
                   right: 0,
-                  child: Center(child: Tag('AI ĐANG QUÉT')),
+                  child: Center(
+                    child: Tag(
+                      analyzing ? 'AI ĐANG PHÂN TÍCH' : 'SẴN SÀNG QUÉT',
+                    ),
+                  ),
                 ),
                 Positioned(
                   left: 14,
                   bottom: 15,
                   child: Text(
-                    scanned
-                        ? 'NHẬN DIỆN 96%\nMSI GeForce RTX 4060 Ventus 2X'
+                    analysis != null
+                        ? analysis!
+                        : scanned
+                        ? 'SẴN SÀNG PHÂN TÍCH ẢNH'
                         : 'SẴN SÀNG QUÉT\nĐưa linh kiện vào khung',
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
@@ -1831,27 +2070,34 @@ class _ScannerScreenState extends State<ScannerScreen> {
           Center(
             child: InkWell(
               borderRadius: BorderRadius.circular(40),
-              onTap: () async {
-                final allowed = await requestCameraPermission(context);
-                if (allowed && mounted) {
-                  setState(() => scanned = true);
-                  showDemoMessage(
-                    this.context,
-                    'Đã nhận diện GPU mẫu trong chế độ demo.',
-                  );
-                }
-              },
-              child: const CircleAvatar(
+              onTap: analyzing
+                  ? null
+                  : () => _pickAndAnalyze(ImageSource.camera),
+              child: CircleAvatar(
                 radius: 34,
                 backgroundColor: mint,
-                child: Icon(Icons.camera_alt, color: bg, size: 28),
+                child: analyzing
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(color: bg),
+                      )
+                    : const Icon(Icons.camera_alt, color: bg, size: 28),
               ),
             ),
           ),
           const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: analyzing
+                ? null
+                : () => _pickAndAnalyze(ImageSource.gallery),
+            icon: const Icon(Icons.photo_library_outlined),
+            label: const Text('Chọn ảnh từ thư viện để phân tích'),
+          ),
+          const SizedBox(height: 10),
           const Center(
             child: Text(
-              'Chạm để quét • Giữ máy ổn định',
+              'Chụp hoặc chọn ảnh • LM Studio Vision sẽ phân tích',
               style: TextStyle(color: muted),
             ),
           ),
@@ -1864,6 +2110,24 @@ class _ScannerScreenState extends State<ScannerScreen> {
 class CompatibilityScreen extends StatelessWidget {
   const CompatibilityScreen({super.key, this.report});
   final Map<String, dynamic>? report;
+
+  Future<void> _replace(BuildContext context, Map<String, dynamic> item) async {
+    try {
+      await ApiClient.instance.updateComponent(
+        item['type'].toString(),
+        item['id'].toString(),
+      );
+      if (context.mounted) {
+        showDemoMessage(context, 'Đã thay thế bằng ${item['name']}.');
+        Navigator.pop(context, true);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        showDemoMessage(context, 'Không thể thay thế: $error');
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Báo cáo tương thích',
@@ -1895,21 +2159,50 @@ class CompatibilityScreen extends StatelessWidget {
                 text: issue['message'].toString(),
               ),
             ),
+          if (report?['criteria'] is List)
+            ...((report!['criteria'] as List).map(
+              (criterion) => InfoTile(
+                icon: criterion['status'] == 'pass'
+                    ? Icons.check_circle_outline
+                    : criterion['status'] == 'unchecked'
+                    ? Icons.help_outline
+                    : Icons.warning_amber_outlined,
+                text:
+                    '${criterion['code']}: ${criterion['status']} • ${criterion['remediation']}',
+              ),
+            )),
           const SizedBox(height: 14),
           const Text(
             'Đề xuất thay thế',
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 10),
-          ProductCard(
-            product: const Product(
-              'Corsair RM750e 750W Gold',
-              '2.590.000đ',
-              'Dư 24% công suất • ATX 3.0',
-              'assets/figma/gpu2.png',
+          if (report?['recommendations'] is List &&
+              (report!['recommendations'] as List).isNotEmpty)
+            ...(report!['recommendations'] as List).map((item) {
+              final product = Map<String, dynamic>.from(item as Map);
+              return CardBox(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${product['name']}\n${product['price']}đ',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => _replace(context, product),
+                      child: const Text('Thay thế'),
+                    ),
+                  ],
+                ),
+              );
+            })
+          else
+            const Text(
+              'Chưa có linh kiện thay thế phù hợp từ catalog hiện tại.',
+              style: TextStyle(color: muted),
             ),
-            onTap: () {},
-          ),
         ],
       ),
     ),
@@ -1917,7 +2210,8 @@ class CompatibilityScreen extends StatelessWidget {
 }
 
 class ChatTab extends StatefulWidget {
-  const ChatTab({super.key});
+  const ChatTab({super.key, this.initialPrompt});
+  final String? initialPrompt;
   @override
   State<ChatTab> createState() => _ChatTabState();
 }
@@ -1930,6 +2224,9 @@ class _ChatTabState extends State<ChatTab> {
   @override
   void initState() {
     super.initState();
+    if (widget.initialPrompt != null && widget.initialPrompt!.isNotEmpty) {
+      messages.add({'role': 'assistant', 'text': widget.initialPrompt!});
+    }
     _startConversation();
   }
 
@@ -1954,7 +2251,10 @@ class _ChatTabState extends State<ChatTab> {
     title: 'BuildMate AI',
     subtitle: '● Trực tuyến • hiểu giá địa phương',
     action: TextButton(
-      onPressed: () => showDemoMessage(context, 'Đã xóa cuộc trò chuyện demo.'),
+      onPressed: () {
+        if (!mounted) return;
+        setState(() => messages.clear());
+      },
       child: const Text('Xóa', style: TextStyle(color: mint)),
     ),
     child: SafeArea(
@@ -1970,12 +2270,21 @@ class _ChatTabState extends State<ChatTab> {
                         'Chào bạn! Hãy hỏi về linh kiện, giá hoặc tương thích.',
                     dark: true,
                   ),
-                const Wrap(
+                Wrap(
                   spacing: 6,
                   children: [
-                    Tag('GPU dưới 10 triệu'),
-                    Tag('Build gaming 20 triệu'),
-                    Tag('So sánh hàng cũ/mới'),
+                    _SuggestionChip(
+                      text: 'GPU dưới 10 triệu',
+                      onTap: () => _useSuggestion('GPU dưới 10 triệu'),
+                    ),
+                    _SuggestionChip(
+                      text: 'Build gaming 20 triệu',
+                      onTap: () => _useSuggestion('Build gaming 20 triệu'),
+                    ),
+                    _SuggestionChip(
+                      text: 'So sánh hàng cũ/mới',
+                      onTap: () => _useSuggestion('So sánh hàng cũ/mới'),
+                    ),
                   ],
                 ),
                 ...messages.map(
@@ -2021,34 +2330,47 @@ class _ChatTabState extends State<ChatTab> {
     }
     question.clear();
     setState(() => messages.add({'role': 'user', 'text': text}));
-    if (ApiClient.instance.token == null) {
-      setState(
-        () => messages.add({
-          'role': 'assistant',
-          'text': 'Hãy đăng nhập để BuildMate gửi câu hỏi lên API.',
-        }),
-      );
-      return;
-    }
     try {
-      conversationId ??=
-          (await ApiClient.instance.createConversation())['id'] as String;
-      final response = await ApiClient.instance.sendMessage(
-        conversationId!,
+      final answer = await ApiClient.instance.sendLmStudioMessage(
         text,
+        history: messages
+            .take(messages.length - 1)
+            .map(
+              (message) => {
+                'role': message['role']!,
+                'content': message['text']!,
+              },
+            )
+            .toList(),
       );
       if (mounted) {
-        setState(
-          () => messages.add({
-            'role': 'assistant',
-            'text': response['answer'] as String,
-          }),
-        );
+        setState(() => messages.add({'role': 'assistant', 'text': answer}));
       }
     } catch (error) {
       if (mounted) showDemoMessage(context, 'Không gửi được tin nhắn: $error');
     }
   }
+
+  void _useSuggestion(String value) {
+    question
+      ..text = value
+      ..selection = TextSelection.collapsed(offset: value.length);
+  }
+}
+
+class _SuggestionChip extends StatelessWidget {
+  const _SuggestionChip({required this.text, required this.onTap});
+  final String text;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => ActionChip(
+    label: Text(text),
+    onPressed: onTap,
+    labelStyle: const TextStyle(color: mint, fontSize: 11),
+    backgroundColor: greenPanel,
+    side: BorderSide.none,
+  );
 }
 
 class SavedTab extends StatefulWidget {
@@ -2063,7 +2385,16 @@ class _SavedTabState extends State<SavedTab> {
   @override
   void initState() {
     super.initState();
-    buildsFuture = ApiClient.instance.builds();
+    buildsFuture = _loadBuilds();
+  }
+
+  Future<List<Map<String, dynamic>>> _loadBuilds() async {
+    if (ApiClient.instance.token == null) {
+      throw ApiException(
+        'Phiên đăng nhập đã hết. Hãy đăng nhập lại để xem cấu hình đã lưu.',
+      );
+    }
+    return ApiClient.instance.builds();
   }
 
   Future<void> _deleteBuild(Map<String, dynamic> build) async {
@@ -2092,8 +2423,19 @@ class _SavedTabState extends State<SavedTab> {
     try {
       await ApiClient.instance.deleteBuild(id);
       if (mounted) {
-        setState(() => buildsFuture = ApiClient.instance.builds());
+        setState(() {
+          buildsFuture = _loadBuilds();
+        });
         showDemoMessage(context, 'Đã xóa cấu hình khỏi tài khoản.');
+      }
+    } on ApiException catch (error) {
+      if (error.statusCode == 404 && mounted) {
+        setState(() {
+          buildsFuture = _loadBuilds();
+        });
+        showDemoMessage(context, 'Cấu hình này đã được xóa trước đó.');
+      } else if (mounted) {
+        showDemoMessage(context, 'Không thể xóa cấu hình: $error');
       }
     } catch (error) {
       if (mounted) showDemoMessage(context, 'Không thể xóa cấu hình: $error');
@@ -2111,7 +2453,9 @@ class _SavedTabState extends State<SavedTab> {
             MaterialPageRoute(builder: (_) => const BuildTab()),
           ).then((_) {
             if (mounted) {
-              setState(() => buildsFuture = ApiClient.instance.builds());
+              setState(() {
+                buildsFuture = _loadBuilds();
+              });
             }
           }),
       icon: const Icon(Icons.add, color: mint, size: 18),
@@ -2155,17 +2499,22 @@ class _SavedTabState extends State<SavedTab> {
                       ? 'TƯƠNG THÍCH'
                       : 'ĐANG LÀM',
                   area: build['areaId']?.toString() ?? 'TP. HỒ CHÍ MINH',
+                  components: build['components'] is Map
+                      ? Map<String, dynamic>.from(build['components'] as Map)
+                      : const {},
                   onEdit: () =>
                       Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (_) => BuildTab(initialBuild: build),
                         ),
-                      ).then(
-                        (_) => setState(
-                          () => buildsFuture = ApiClient.instance.builds(),
-                        ),
-                      ),
+                      ).then((_) {
+                        if (mounted) {
+                          setState(() {
+                            buildsFuture = _loadBuilds();
+                          });
+                        }
+                      }),
                   onDelete: () => _deleteBuild(build),
                 ),
               ),
@@ -2177,8 +2526,207 @@ class _SavedTabState extends State<SavedTab> {
   );
 }
 
-class AccountTab extends StatelessWidget {
+class AccountTab extends StatefulWidget {
   const AccountTab({super.key});
+  @override
+  State<AccountTab> createState() => _AccountTabState();
+}
+
+class _AccountTabState extends State<AccountTab> {
+  bool pricePreference = true;
+  bool priceNotifications = true;
+  Map<String, dynamic>? get user => ApiClient.instance.currentUser;
+
+  @override
+  void initState() {
+    super.initState();
+    final preferences = user?['preferences'];
+    if (preferences is Map) {
+      pricePreference = preferences['pricePreference'] as bool? ?? true;
+      priceNotifications = preferences['priceNotifications'] as bool? ?? true;
+    }
+  }
+
+  Future<void> _updatePreference({
+    bool? pricePreference,
+    bool? priceNotifications,
+  }) async {
+    try {
+      await ApiClient.instance.updateProfile(
+        pricePreference: pricePreference,
+        priceNotifications: priceNotifications,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (pricePreference != null) this.pricePreference = pricePreference;
+        if (priceNotifications != null) {
+          this.priceNotifications = priceNotifications;
+        }
+      });
+    } catch (error) {
+      if (mounted) showMessage(context, 'Không thể lưu tùy chọn: $error');
+    }
+  }
+
+  Future<void> _editProfile() async {
+    final name = TextEditingController(text: user?['name']?.toString() ?? '');
+    final avatar = TextEditingController(
+      text: user?['avatarUrl']?.toString() ?? '',
+    );
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Chỉnh sửa tài khoản'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: name,
+              decoration: const InputDecoration(labelText: 'Tên người dùng'),
+            ),
+            TextField(
+              controller: avatar,
+              decoration: const InputDecoration(labelText: 'URL avatar'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              try {
+                await ApiClient.instance.updateProfile(
+                  name: name.text.trim(),
+                  avatarUrl: avatar.text.trim(),
+                );
+                if (dialogContext.mounted) Navigator.pop(dialogContext, true);
+              } catch (error) {
+                if (dialogContext.mounted) {
+                  showDemoMessage(dialogContext, '$error');
+                }
+              }
+            },
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    );
+    name.dispose();
+    avatar.dispose();
+    if (result == true && mounted) setState(() {});
+  }
+
+  Future<void> _changeArea() async {
+    final areas = await ApiClient.instance.areas();
+    if (!mounted) return;
+    final area = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      builder: (sheetContext) => ListView(
+        shrinkWrap: true,
+        children: areas
+            .map(
+              (item) => ListTile(
+                title: Text(item['name'].toString()),
+                onTap: () => Navigator.pop(sheetContext, item),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (area == null) return;
+    await ApiClient.instance.updateProfile(areaId: area['id'].toString());
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _openPrivacy() async {
+    final areaId = user?['areaId']?.toString() ?? 'hcm';
+    String areaName = areaId;
+    try {
+      final areas = await ApiClient.instance.areas();
+      areaName = areas
+          .firstWhere(
+            (item) => item['id']?.toString() == areaId,
+            orElse: () => {'name': areaId},
+          )['name']
+          .toString();
+    } catch (_) {}
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Quyền riêng tư & vị trí'),
+        content: Text(
+          'Vị trí định giá hiện tại: $areaName\n\n'
+          '• Vị trí: chỉ dùng khi bạn yêu cầu xác định khu vực giá.\n'
+          '• Camera: chỉ dùng khi bạn mở chức năng quét sản phẩm.\n'
+          '• Ảnh/thư viện: chỉ đọc ảnh bạn chọn để phân tích.\n'
+          '• Dữ liệu cấu hình: lưu theo tài khoản và không chia sẻ công khai.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Đóng'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _changeArea();
+            },
+            child: const Text('Đổi khu vực'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openSupport() async {
+    final message = TextEditingController();
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Trợ giúp & hỗ trợ'),
+        content: TextField(
+          controller: message,
+          minLines: 4,
+          maxLines: 7,
+          decoration: const InputDecoration(
+            hintText: 'Mô tả vấn đề (10–2.000 ký tự)',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              try {
+                final request = await ApiClient.instance.submitSupportRequest(
+                  message: message.text.trim(),
+                );
+                if (dialogContext.mounted) {
+                  Navigator.pop(dialogContext, true);
+                  showMessage(
+                    context,
+                    'Đã tiếp nhận yêu cầu ${request['id']}.',
+                  );
+                }
+              } catch (error) {
+                if (dialogContext.mounted) showMessage(dialogContext, '$error');
+              }
+            },
+            child: const Text('Gửi'),
+          ),
+        ],
+      ),
+    );
+    message.dispose();
+    if (result == true && mounted) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Tài khoản',
@@ -2190,13 +2738,27 @@ class AccountTab extends StatelessWidget {
           CardBox(
             child: Row(
               children: [
-                const CircleAvatar(
+                CircleAvatar(
                   radius: 23,
                   backgroundColor: greenPanel,
-                  child: Text(
-                    'MN',
-                    style: TextStyle(color: mint, fontWeight: FontWeight.bold),
-                  ),
+                  backgroundImage:
+                      user?['avatarUrl']?.toString().isNotEmpty == true
+                      ? NetworkImage(user!['avatarUrl'].toString())
+                      : null,
+                  child: user?['avatarUrl']?.toString().isNotEmpty == true
+                      ? null
+                      : Text(
+                          (user?['name']?.toString() ?? 'U')
+                              .trim()
+                              .split(RegExp(r'\s+'))
+                              .last
+                              .substring(0, 1)
+                              .toUpperCase(),
+                          style: const TextStyle(
+                            color: mint,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -2204,51 +2766,55 @@ class AccountTab extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Minh Nguyễn',
+                        user?['name']?.toString() ?? 'Người dùng',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       Text(
-                        'minh.nguyen@email.com',
+                        user?['email']?.toString() ?? '',
                         style: const TextStyle(color: muted, fontSize: 11),
                       ),
                     ],
                   ),
                 ),
-                const Tag('Chỉnh sửa'),
+                TextButton(
+                  onPressed: _editProfile,
+                  child: const Text('Chỉnh sửa'),
+                ),
               ],
             ),
           ),
           const SizedBox(height: 12),
           InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: () => requestLocationPermission(context),
-            child: const InfoTile(
+            onTap: _changeArea,
+            child: InfoTile(
               icon: Icons.location_on_outlined,
-              text: 'ĐỊNH GIÁ HIỆN TẠI · GPS\nTP. Hồ Chí Minh',
+              text: 'ĐỊNH GIÁ HIỆN TẠI · KHU VỰC\n${user?['areaId'] ?? 'hcm'}',
               trailing: 'Thay đổi',
             ),
           ),
           const SizedBox(height: 12),
           CardBox(
             child: Column(
-              children: const [
-                SettingRow(
-                  icon: Icons.bookmark_border,
-                  title: 'Cấu hình đã lưu',
-                  detail: '3 build đã đồng bộ',
-                  end: '3',
-                ),
+              children: [
                 SettingRow(
                   icon: Icons.local_offer_outlined,
                   title: 'Ưu tiên giá linh kiện',
                   detail: 'Hiển thị hàng mới trước',
-                  end: 'Hàng mới',
+                  end: pricePreference ? 'Hàng mới' : 'Giá tốt',
+                  toggle: true,
+                  value: pricePreference,
+                  onToggle: (value) =>
+                      _updatePreference(pricePreference: value),
                 ),
                 SettingRow(
                   icon: Icons.notifications_none,
                   title: 'Thông báo biến động giá',
                   detail: 'Báo khi giá thay đổi từ 3%',
                   toggle: true,
+                  value: priceNotifications,
+                  onToggle: (value) =>
+                      _updatePreference(priceNotifications: value),
                 ),
               ],
             ),
@@ -2256,17 +2822,24 @@ class AccountTab extends StatelessWidget {
           const SizedBox(height: 12),
           CardBox(
             child: Column(
-              children: const [
+              children: [
                 SettingRow(
                   icon: Icons.cancel_outlined,
                   title: 'Bảo mật & đổi mật khẩu',
                   end: '›',
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const ChangePasswordScreen(),
+                    ),
+                  ),
                 ),
                 SettingRow(
                   icon: Icons.lock_outline,
                   title: 'Quyền riêng tư & vị trí',
                   detail: 'Vị trí: Khi dùng ứng dụng',
                   end: '›',
+                  onTap: _openPrivacy,
                 ),
               ],
             ),
@@ -2274,17 +2847,17 @@ class AccountTab extends StatelessWidget {
           const SizedBox(height: 12),
           CardBox(
             child: Column(
-              children: const [
+              children: [
                 SettingRow(
                   icon: Icons.help_outline,
                   title: 'Trợ giúp & liên hệ',
                   end: '›',
+                  onTap: _openSupport,
                 ),
                 SettingRow(
                   icon: Icons.help_outline,
                   title: 'PCBuild Local',
-                  detail: 'Phiên bản 1.8.2 • Build 246',
-                  end: 'Mới nhất',
+                  detail: 'Ứng dụng xây dựng cấu hình PC',
                 ),
               ],
             ),
@@ -2292,13 +2865,92 @@ class AccountTab extends StatelessWidget {
           const SizedBox(height: 12),
           SecondaryButton(
             text: 'Đăng xuất',
-            onPressed: () => Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const LoginScreen()),
-            ),
+            onPressed: () {
+              ApiClient.instance.logout();
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+              );
+            },
           ),
         ],
       ),
+    ),
+  );
+}
+
+class ChangePasswordScreen extends StatefulWidget {
+  const ChangePasswordScreen({super.key});
+  @override
+  State<ChangePasswordScreen> createState() => _ChangePasswordScreenState();
+}
+
+class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
+  final current = TextEditingController();
+  final next = TextEditingController();
+  final confirmation = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    current.dispose();
+    next.dispose();
+    confirmation.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (next.text.length < 8 || next.text != confirmation.text) {
+      showMessage(
+        context,
+        'Mật khẩu mới phải có ít nhất 8 ký tự và khớp xác nhận.',
+      );
+      return;
+    }
+    setState(() => busy = true);
+    try {
+      await ApiClient.instance.changePassword(current.text, next.text);
+      if (!mounted) return;
+      showMessage(context, 'Đã đổi mật khẩu thành công.');
+      Navigator.pop(context);
+    } catch (error) {
+      if (mounted) showMessage(context, 'Không thể đổi mật khẩu: $error');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Shell(
+    title: 'Đổi mật khẩu',
+    subtitle: 'Bảo vệ tài khoản của bạn',
+    back: true,
+    child: ListView(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 20),
+      children: [
+        TextField(
+          controller: current,
+          obscureText: true,
+          decoration: const InputDecoration(labelText: 'Mật khẩu hiện tại'),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: next,
+          obscureText: true,
+          decoration: const InputDecoration(labelText: 'Mật khẩu mới'),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: confirmation,
+          obscureText: true,
+          decoration: const InputDecoration(labelText: 'Nhập lại mật khẩu mới'),
+        ),
+        const SizedBox(height: 20),
+        PrimaryButton(
+          text: busy ? 'ĐANG CẬP NHẬT...' : 'ĐỔI MẬT KHẨU',
+          onPressed: busy ? () {} : _submit,
+        ),
+      ],
     ),
   );
 }
@@ -2461,10 +3113,12 @@ class MarketCard extends StatelessWidget {
     this.items = const [],
     this.loading = false,
     this.error,
+    this.onTap,
   });
   final List<Map<String, dynamic>> items;
   final bool loading;
   final String? error;
+  final VoidCallback? onTap;
 
   String _price(dynamic value) {
     final price = (num.tryParse(value.toString()) ?? 0) / 1000000;
@@ -2472,56 +3126,90 @@ class MarketCard extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => CardBox(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+  Widget build(BuildContext context) {
+    final changedItems = items
+        .where((item) => ((item['trend'] as num?)?.toDouble() ?? 0) != 0)
+        .toList();
+    return InkWell(
+      onTap: changedItems.isEmpty ? null : onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: CardBox(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Nhịp giá thị trường',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Nhịp giá thị trường',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const Tag('HÔM NAY'),
+              ],
             ),
-            const Tag('HÔM NAY'),
-          ],
-        ),
-        const SizedBox(height: 10),
-        if (loading)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: LinearProgressIndicator(
-              color: mint,
-              backgroundColor: stroke,
-            ),
-          )
-        else if (error != null)
-          Text(error!, style: const TextStyle(color: muted))
-        else
-          ...items.map(
-            (item) => Padding(
-              padding: const EdgeInsets.only(bottom: 7),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Text(
-                      item['name'] as String? ?? 'Sản phẩm',
-                      style: const TextStyle(color: muted),
-                      overflow: TextOverflow.ellipsis,
+            const SizedBox(height: 10),
+            if (loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: LinearProgressIndicator(
+                  color: mint,
+                  backgroundColor: stroke,
+                ),
+              )
+            else if (error != null)
+              Text(error!, style: const TextStyle(color: muted))
+            else if (changedItems.isEmpty)
+              const Text(
+                'Chưa có linh kiện thay đổi giá trong khu vực này.',
+                style: TextStyle(color: muted),
+              )
+            else
+              ...changedItems
+                  .take(3)
+                  .map(
+                    (item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 7),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              item['name'] as String? ?? 'Sản phẩm',
+                              style: const TextStyle(color: muted),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final trend =
+                                  (item['trend'] as num?)?.toDouble() ?? 0;
+                              return Text(
+                                '${_price(item['price'])}  ${trend < 0 ? '↓' : '↑'} ${trend.abs()}%',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                  Text(
-                    '${_price(item['price'])}  ${item['trend'] < 0 ? '↓' : '↑'} ${item['trend'].abs()}%',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ],
+            if (!loading && error == null && changedItems.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: onTap,
+                  child: const Text('Xem giá thị trường'),
+                ),
               ),
-            ),
-          ),
-      ],
-    ),
-  );
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class QuickCard extends StatelessWidget {
@@ -2550,9 +3238,15 @@ class QuickCard extends StatelessWidget {
 }
 
 class BuildProgress extends StatelessWidget {
-  const BuildProgress({super.key, this.buildData, this.loading = false});
+  const BuildProgress({
+    super.key,
+    this.buildData,
+    this.loading = false,
+    this.onContinue,
+  });
   final Map<String, dynamic>? buildData;
   final bool loading;
+  final VoidCallback? onContinue;
 
   @override
   Widget build(BuildContext context) => CardBox(
@@ -2585,10 +3279,47 @@ class BuildProgress extends StatelessWidget {
             color: mint,
             backgroundColor: stroke,
           ),
+          const SizedBox(height: 8),
+          Text(
+            'Tạm tính: ${_formatVnd(buildData!['totalPrice'])}',
+            style: const TextStyle(color: mint, fontSize: 19),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${_remainingPrice(buildData!)} • ${_missingComponents(buildData!)}',
+            style: const TextStyle(color: muted, fontSize: 11),
+          ),
+          const SizedBox(height: 10),
+          if (onContinue != null)
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: onContinue,
+                child: const Text('Tiếp tục build'),
+              ),
+            ),
         ],
       ],
     ),
   );
+
+  String _formatVnd(dynamic value) {
+    final amount = (value as num?)?.toInt() ?? 0;
+    return '${amount.toString().replaceAllMapped(RegExp(r'(\d)(?=(\d{3})+(?!\d))'), (m) => '${m[1]}.')}đ';
+  }
+
+  String _remainingPrice(Map<String, dynamic> build) {
+    final budget = (build['budget'] as num?)?.toInt() ?? 0;
+    final total = (build['totalPrice'] as num?)?.toInt() ?? 0;
+    return 'Còn ${_formatVnd((budget - total).clamp(0, budget))}';
+  }
+
+  String _missingComponents(Map<String, dynamic> build) {
+    final components = build['components'];
+    if (components is! Map) return 'chưa đủ dữ liệu';
+    final missing = components.values.where((value) => value == null).length;
+    return missing == 0 ? 'đủ linh kiện' : 'thiếu $missing linh kiện';
+  }
 }
 
 class ProgressLine extends StatelessWidget {
@@ -2858,15 +3589,9 @@ class WarningRow extends StatelessWidget {
 }
 
 class ChatBubble extends StatelessWidget {
-  const ChatBubble({
-    super.key,
-    required this.text,
-    required this.dark,
-    this.product = false,
-  });
+  const ChatBubble({super.key, required this.text, required this.dark});
   final String text;
   final bool dark;
-  final bool product;
   @override
   Widget build(BuildContext context) => Container(
     margin: const EdgeInsets.only(bottom: 10),
@@ -2877,14 +3602,7 @@ class ChatBubble extends StatelessWidget {
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(text, style: const TextStyle(fontSize: 12)),
-        if (product)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: ProductCard(product: products[0], onTap: () {}),
-          ),
-      ],
+      children: [Text(text, style: const TextStyle(fontSize: 12))],
     ),
   );
 }
@@ -2896,6 +3614,7 @@ class SavedCard extends StatelessWidget {
     required this.price,
     required this.status,
     required this.area,
+    required this.components,
     this.onEdit,
     this.onDelete,
   });
@@ -2903,6 +3622,7 @@ class SavedCard extends StatelessWidget {
   final String price;
   final String status;
   final String area;
+  final Map<String, dynamic> components;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
   @override
@@ -2917,46 +3637,51 @@ class SavedCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 6),
-        const Text(
-          'Ryzen 5 7600 · B650M · RTX 4060 Ti · 32GB DDR5 · SSD 1TB · PSU 650W',
-          style: TextStyle(color: muted, fontSize: 10),
+        Text(
+          _componentSummary,
+          style: const TextStyle(color: muted, fontSize: 10),
         ),
         const SizedBox(height: 8),
         Text(
           'GIÁ TẠI $area',
           style: const TextStyle(color: muted, fontSize: 9),
         ),
+        Text(price, style: const TextStyle(color: mint, fontSize: 19)),
+        const SizedBox(height: 8),
         Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(price, style: const TextStyle(color: mint, fontSize: 19)),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: onEdit,
-                    icon: const Icon(Icons.edit_outlined, size: 16),
-                    label: const Text('Sửa'),
-                  ),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: onEdit,
+                icon: const Icon(Icons.edit_outlined, size: 16),
+                label: const Text('Sửa'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: onDelete,
+                icon: const Icon(Icons.delete_outline, size: 16),
+                label: const Text('Xóa'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline, size: 16),
-                    label: const Text('Xóa'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.redAccent,
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
       ],
     ),
   );
+
+  String get _componentSummary {
+    final names = components.values
+        .whereType<Map>()
+        .map((item) => item['name']?.toString())
+        .whereType<String>()
+        .toList();
+    return names.isEmpty ? 'Chưa chọn linh kiện' : names.join(' · ');
+  }
 }
 
 class SettingRow extends StatelessWidget {
@@ -2967,50 +3692,63 @@ class SettingRow extends StatelessWidget {
     this.detail,
     this.end,
     this.toggle = false,
+    this.value = false,
+    this.onTap,
+    this.onToggle,
   });
   final IconData icon;
   final String title;
   final String? detail;
   final String? end;
   final bool toggle;
+  final bool value;
+  final VoidCallback? onTap;
+  final ValueChanged<bool>? onToggle;
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    child: Row(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(7),
-          decoration: BoxDecoration(
-            color: panel2,
-            borderRadius: BorderRadius.circular(8),
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(10),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(7),
+            decoration: BoxDecoration(
+              color: panel2,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, size: 16, color: mint),
           ),
-          child: Icon(icon, size: 16, color: mint),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-              ),
-              if (detail != null)
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Text(
-                  detail!,
-                  style: const TextStyle(color: muted, fontSize: 10),
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
                 ),
-            ],
+                if (detail != null)
+                  Text(
+                    detail!,
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+              ],
+            ),
           ),
-        ),
-        if (toggle)
-          Switch(value: true, onChanged: (_) {}, activeThumbColor: mint)
-        else
-          Text(end ?? '›', style: const TextStyle(color: muted, fontSize: 11)),
-      ],
+          if (toggle)
+            Switch(value: value, onChanged: onToggle, activeThumbColor: mint)
+          else
+            Text(
+              end ?? '›',
+              style: const TextStyle(color: muted, fontSize: 11),
+            ),
+        ],
+      ),
     ),
   );
 }

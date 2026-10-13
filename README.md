@@ -79,3 +79,101 @@ npm start
 
 Swagger UI: `http://localhost:3000/docs`. Hướng dẫn JWT, CRUD, VS Code Port
 Forwarding và Gmail SMTP tại [backend/README.md](backend/README.md).
+
+## Kết nối AI local bằng LM Studio và ngrok
+
+Màn hình BuildMate gọi trực tiếp API OpenAI-compatible của LM Studio:
+
+```text
+POST <LM_STUDIO_URL>/chat/completions
+```
+
+Mục **Tài khoản > Kiểm tra kết nối LM Studio** có thể lấy danh sách model và
+gửi một câu hỏi thử. Màn hình **Nhận diện linh kiện** cho phép chụp ảnh hoặc
+chọn ảnh từ thư viện rồi gửi ảnh tới model Vision đang chạy.
+
+Trong LM Studio, tải model, mở **Developer > Local Server**, chọn model rồi
+bấm **Start Server**. Bật CORS nếu chạy Flutter Web. Kiểm tra:
+
+```powershell
+Invoke-RestMethod http://localhost:3105/v1/models
+```
+
+Chạy Flutter với LM Studio local:
+
+```powershell
+flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:3000 --dart-define=LM_STUDIO_URL=http://localhost:3105/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Với cấu hình public hiện tại, backend và LM Studio được giữ local, còn client
+truy cập qua hai tunnel ngrok:
+
+```powershell
+flutter run -d chrome --dart-define=LM_STUDIO_URL=https://pillowlike-poikilitic-ciara.ngrok-free.dev/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Android Emulator hoặc điện thoại thật dùng API public qua ngrok:
+
+```powershell
+flutter run -d <device-id> `
+  --dart-define=API_BASE_URL=https://broiler-ocean-twistable.ngrok-free.dev `
+  --dart-define=LM_STUDIO_URL=https://pillowlike-poikilitic-ciara.ngrok-free.dev/v1 `
+  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Điện thoại thật hoặc máy ngoài mạng dùng ngrok:
+
+```powershell
+ngrok http 1234
+flutter run -d <device-id> --dart-define=LM_STUDIO_URL=https://<ngrok-id>.ngrok-free.app/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Không dùng `localhost` hoặc `127.0.0.1` trên điện thoại thật. URL ngrok chỉ
+hoạt động khi LM Studio và ngrok vẫn đang chạy. Không public LM Studio lâu dài
+vì URL này cho phép người có đường dẫn gọi model trên máy của bạn; nên giới
+hạn truy cập ngrok hoặc chỉ dùng trong lúc demo.
+
+Có thể truyền API key nếu server LM Studio/ngrok yêu cầu:
+
+```powershell
+flutter run -d chrome --dart-define=LM_STUDIO_URL=https://<ngrok-id>.ngrok-free.app/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct --dart-define=LM_STUDIO_API_KEY=<key>
+```
+
+Các biến cấu hình được khai báo trong
+`lib/config/ai_config.dart`: `LM_STUDIO_URL`, `LM_STUDIO_MODEL`,
+`LM_STUDIO_API_KEY` và `LM_STUDIO_ENABLED`.
+
+## Chạy local và public bằng ngrok
+
+Backend và LM Studio chạy local trên cùng máy:
+
+```powershell
+# Terminal 1 - backend local
+cd backend
+npm start
+
+# Terminal 2 - LM Studio local
+# LM Studio Local Server: localhost:3105
+
+# Terminal 3 - public backend
+ngrok http 3000
+
+# Terminal 4 - public LM Studio
+ngrok http 3105
+```
+
+## Lệnh chạy Android qua API public
+
+Thay `dc3b582c` bằng device ID hiển thị trong `flutter devices` nếu cần.
+
+```powershell
+flutter run -d dc3b582c `
+  --dart-define=API_BASE_URL=https://broiler-ocean-twistable.ngrok-free.dev `
+  --dart-define=LM_STUDIO_URL=https://pillowlike-poikilitic-ciara.ngrok-free.dev/v1 `
+  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Lệnh trên dùng cả backend và LM Studio qua public API.
+
+Lệnh trên dùng backend và LM Studio qua public API, không dùng địa chỉ LAN.
+Hai tunnel ngrok và hai dịch vụ local phải đang chạy trước khi khởi động app.

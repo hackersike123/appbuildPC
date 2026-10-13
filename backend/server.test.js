@@ -44,6 +44,19 @@ test('register, login, build and compatibility flow', async () => {
   assert.equal(invalidAuth.status, 401);
   const me = await request('/api/v1/auth/me', { method: 'GET', headers });
   assert.equal(me.status, 200);
+  const updatedProfile = await request('/api/v1/auth/me', {
+    method: 'PUT',
+    headers,
+    body: {
+      name: 'Updated User',
+      areaId: 'hanoi',
+      preferences: { pricePreference: false, priceNotifications: true }
+    }
+  });
+  assert.equal(updatedProfile.status, 200);
+  const updatedProfileBody = await updatedProfile.json();
+  assert.equal(updatedProfileBody.name, 'Updated User');
+  assert.equal(updatedProfileBody.preferences.pricePreference, false);
   const notifications = await request('/api/v1/notifications', { method: 'GET', headers });
   assert.equal(notifications.status, 200);
   assert.equal((await notifications.json()).length, 1);
@@ -106,11 +119,39 @@ test('register, login, build and compatibility flow', async () => {
     method: 'PUT', headers, body: { name: 'Updated build', budget: 25000000 }
   });
   assert.equal(renamed.status, 200);
-  assert.equal((await renamed.json()).name, 'Updated build');
+  const renamedBody = await renamed.json();
+  assert.equal(renamedBody.name, 'Updated build');
+  const conflict = await request(`/api/v1/builds/${buildBody.id}`, {
+    method: 'PUT', headers, body: { name: 'Stale write', expectedVersion: 1 }
+  });
+  assert.equal(conflict.status, 409);
+  const duplicateBuild = await request(`/api/v1/builds/${buildBody.id}/duplicate`, {
+    method: 'POST', headers, body: { name: 'Copied build' }
+  });
+  assert.equal(duplicateBuild.status, 201);
+  assert.equal((await duplicateBuild.json()).name, 'Copied build');
   const listedBuilds = await request('/api/v1/builds', { method: 'GET', headers });
-  assert.equal((await listedBuilds.json()).length, 1);
+  assert.equal((await listedBuilds.json()).length, 2);
   const products = await request('/api/v1/products?type=GPU', { method: 'GET' });
   assert.ok((await products.json()).length >= 4);
+  const comparison = await request('/api/v1/compare?productIds=gpu-4060,gpu-4060-gigabyte', { method: 'GET' });
+  assert.equal(comparison.status, 200);
+  assert.equal((await comparison.json()).products.length, 2);
+  const scan = await request('/api/v1/scans', {
+    method: 'POST', headers, body: { candidateProductIds: ['gpu-4060', 'gpu-4060-msi'], confidence: 0.82 }
+  });
+  assert.equal(scan.status, 201);
+  const scanBody = await scan.json();
+  assert.equal(scanBody.status, 'awaiting_confirmation');
+  const confirmedScan = await request(`/api/v1/scans/${scanBody.id}/confirm`, {
+    method: 'POST', headers, body: { productId: 'gpu-4060-msi' }
+  });
+  assert.equal(confirmedScan.status, 200);
+  assert.equal((await confirmedScan.json()).status, 'confirmed');
+  const support = await request('/api/v1/support-requests', {
+    method: 'POST', headers, body: { message: 'Tôi cần hỗ trợ kiểm tra cấu hình.' }
+  });
+  assert.equal(support.status, 201);
   const compatibility = await request('/api/v1/compatibility/check', {
     method: 'POST', headers, body: { components: { CPU: 'cpu-7600', MAINBOARD: 'mb-b650m' } }
   });
@@ -120,12 +161,14 @@ test('register, login, build and compatibility flow', async () => {
   assert.equal(areas.status, 200);
   assert.ok((await areas.json()).length >= 3);
   const location = await request('/api/v1/location/resolve', {
-    method: 'POST', body: { areaId: 'hanoi' }
+    method: 'POST', body: { lat: 21.0278, lng: 105.8342 }
   });
-  assert.equal((await location.json()).area.id, 'hanoi');
+  const locationBody = await location.json();
+  assert.equal(locationBody.area.id, 'hanoi');
+  assert.equal(locationBody.source, 'gps');
   const market = await request('/api/v1/market/summary?areaId=hcm', { method: 'GET' });
   const hcmMarket = await market.json();
-  assert.equal(hcmMarket.items.length, 3);
+  assert.ok(hcmMarket.items.length >= 8);
   const hanoiMarket = await request('/api/v1/market/summary?areaId=hanoi', { method: 'GET' });
   assert.notEqual((await hanoiMarket.json()).items[0].price, hcmMarket.items[0].price);
   const deleted = await request(`/api/v1/builds/${buildBody.id}`, { method: 'DELETE', headers });

@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:appbuildpc/main.dart';
 
 void main() {
-  testWidgets('opens the BuildPC demo and starts a configuration', (
+  testWidgets('opens the BuildPC app and starts a configuration', (
     tester,
   ) async {
     await tester.pumpWidget(const PcBuildApp());
@@ -18,10 +18,10 @@ void main() {
     await tester.ensureVisible(build);
     await tester.tap(build);
     await tester.pumpAndSettle();
-    expect(find.text('Gaming 20 triệu'), findsOneWidget);
+    expect(find.text('Build mới'), findsOneWidget);
   });
 
-  testWidgets('can use the recommendation flow', (tester) async {
+  testWidgets('can use the scanner flow', (tester) async {
     await tester.pumpWidget(const PcBuildApp());
     final start = find.text('Bắt đầu với vị trí của tôi');
     await tester.ensureVisible(start);
@@ -36,17 +36,14 @@ void main() {
     expect(find.text('Nhận diện linh kiện'), findsOneWidget);
   });
 
-  testWidgets('can choose an individual component in the builder', (
+  testWidgets('does not show catalog products without the API', (
     tester,
   ) async {
     await tester.pumpWidget(const MaterialApp(home: BuildTab()));
     await tester.tap(find.text('Chọn GPU'));
     await tester.pumpAndSettle();
     expect(find.text('Chọn GPU'), findsOneWidget);
-    await tester.tap(find.text('ASUS Dual GeForce RTX 4060 OC 8GB'));
-    await tester.pumpAndSettle();
-    expect(find.text('ASUS Dual GeForce RTX 4060 OC 8GB'), findsOneWidget);
-    expect(find.text('8,69tr'), findsOneWidget);
+    expect(find.text('ASUS Dual GeForce RTX 4060 OC 8GB'), findsNothing);
   });
 
   testWidgets('validates login and opens the demo home', (tester) async {
@@ -54,7 +51,7 @@ void main() {
     await tester.tap(find.text('Đăng nhập'));
     await tester.pump();
     expect(
-      find.text('Demo yêu cầu email hợp lệ và mật khẩu từ 6 ký tự.'),
+      find.text('Email hợp lệ và mật khẩu tối thiểu 8 ký tự là bắt buộc.'),
       findsOneWidget,
     );
     await tester.enterText(find.byType(TextField).at(0), 'demo@example.com');

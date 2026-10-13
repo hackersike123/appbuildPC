@@ -68,7 +68,7 @@ const seed = {
     { id: 'case-h5-flow', type: 'CASE', name: 'NZXT H5 Flow', price: 2190000, form: 'ATX', gpuLength: 365 },
     { id: 'cooler-ak400', type: 'TẢN NHIỆT', name: 'DeepCool AK400', price: 790000, socket: 'AM5' }
   ],
-  builds: [], alerts: [], conversations: [], scans: [], notifications: [], market: {}
+  builds: [], alerts: [], conversations: [], scans: [], notifications: [], supportRequests: [], market: {}
 };
 
 function loadDb() {
@@ -79,6 +79,7 @@ for (const item of seed.products) {
   if (!db.products.some((existing) => existing.id === item.id)) db.products.push(item);
 }
 db.notifications ??= [];
+db.supportRequests ??= [];
 db.market ??= {};
 db.passwordResetTokens ??= [];
 for (const area of db.areas) {
@@ -171,8 +172,21 @@ function buildView(build) {
   const components = Object.fromEntries(
     componentTypes.map((type) => [type, product(build.components[type]) || null])
   );
-  const total = Object.values(components).filter(Boolean).reduce((sum, item) => sum + item.price, 0);
-  return { ...build, components, totalPrice: total, completion: Math.round(Object.values(components).filter(Boolean).length / 8 * 100) };
+  const selected = Object.values(components).filter(Boolean);
+  const total = selected.reduce((sum, item) => sum + item.price, 0);
+  const power = selected.reduce((sum, item) => sum + Number(item.power || 0), 0);
+  const recommendedPsu = Math.max(450, Math.ceil((power + 150) / 50) * 50);
+  return {
+    ...build,
+    version: Number(build.version || 1),
+    syncState: 'synced',
+    components,
+    totalPrice: total,
+    completion: Math.round(selected.length / componentTypes.length * 100),
+    estimatedPower: power,
+    recommendedPsu,
+    powerDetails: selected.map((item) => ({ id: item.id, name: item.name, watts: Number(item.power || 0) }))
+  };
 }
 function compatibility(components) {
   const items = Object.values(components).map(product);
@@ -187,7 +201,60 @@ function compatibility(components) {
   if (board && ram && board.ram !== ram.ram) issues.push({ code: 'RAM', severity: 'error', message: 'Mainboard không hỗ trợ loại RAM này.' });
   if (psu && gpu && psu.watts < gpu.power + 400) issues.push({ code: 'PSU', severity: 'warning', message: 'Nguồn có thể không đủ công suất khuyến nghị.' });
   if (gpu && box && gpu.length > box.gpuLength) issues.push({ code: 'CASE_SIZE', severity: 'error', message: 'GPU dài hơn khoảng trống của case.' });
-  return { status: issues.some((item) => item.severity === 'error') ? 'incompatible' : issues.length ? 'warning' : 'compatible', score: Math.max(0, 100 - issues.length * 20), issues };
+  const estimatedPower = items.reduce((sum, item) => sum + Number(item?.power || 0), 0);
+  const recommendedPsu = Math.max(450, Math.ceil((estimatedPower + 150) / 50) * 50);
+  const recommendations = [];
+  if (gpu && (!psu || psu.watts < recommendedPsu)) {
+    recommendations.push(...db.products.filter((item) => item.type === 'PSU' && item.watts >= recommendedPsu).slice(0, 3));
+  }
+  if (cpu && board && cpu.socket !== board.socket) {
+    recommendations.push(...db.products.filter((item) => item.type === 'MAINBOARD' && item.socket === cpu.socket).slice(0, 3));
+  }
+  const criteria = [
+    {
+      code: 'SOCKET',
+      severity: 'error',
+      status: cpu && board ? (cpu.socket === board.socket ? 'pass' : 'error') : 'unchecked',
+      comparedFields: ['CPU.socket', 'MAINBOARD.socket'],
+      assumptions: [],
+      remediation: 'Chọn mainboard cùng socket với CPU.'
+    },
+    {
+      code: 'RAM',
+      severity: 'error',
+      status: board && ram ? (board.ram === ram.ram ? 'pass' : 'error') : 'unchecked',
+      comparedFields: ['MAINBOARD.ram', 'RAM.ram'],
+      assumptions: [],
+      remediation: 'Chọn RAM đúng chuẩn mà mainboard hỗ trợ.'
+    },
+    {
+      code: 'PSU',
+      severity: 'warning',
+      status: psu ? (psu.watts >= recommendedPsu ? 'pass' : 'warning') : 'unchecked',
+      comparedFields: ['PSU.watts', 'estimatedPower'],
+      assumptions: ['Công suất là ước tính từ catalog linh kiện.'],
+      remediation: `Nên dùng PSU tối thiểu ${recommendedPsu}W.`
+    },
+    {
+      code: 'CASE_SIZE',
+      severity: 'error',
+      status: gpu && box ? (gpu.length <= box.gpuLength ? 'pass' : 'error') : 'unchecked',
+      comparedFields: ['GPU.length', 'CASE.gpuLength'],
+      assumptions: [],
+      remediation: 'Chọn case có khoảng trống GPU phù hợp.'
+    }
+  ];
+  return {
+    status: issues.some((item) => item.severity === 'error') ? 'incompatible' : issues.length ? 'warning' : 'compatible',
+    score: Math.max(0, 100 - issues.length * 20),
+    issues,
+    estimatedPower,
+    recommendedPsu,
+    recommendations,
+    criteria,
+    checkedAt: new Date().toISOString(),
+    rulesVersion: 'catalog-v1'
+  };
 }
 
 async function route(req, res) {
@@ -242,7 +309,17 @@ if(response.ok) document.getElementById('submit').disabled=true;};
     if (db.users.some((user) => user.email.toLowerCase() === email)) {
       return send(res, 409, { error: 'EMAIL_EXISTS', message: 'Email này đã được đăng ký.' });
     }
-    const user = { id: id('user'), name, email, areaId: body.areaId || 'hcm', passwordHash: crypto.createHash('sha256').update(password).digest('hex') };
+    const user = {
+      id: id('user'),
+      name,
+      email,
+      areaId: body.areaId || 'hcm',
+      preferences: {
+        pricePreference: true,
+        priceNotifications: true
+      },
+      passwordHash: crypto.createHash('sha256').update(password).digest('hex')
+    };
     db.users.push(user);
     db.notifications.push({
       id: id('notification'), userId: user.id,
@@ -308,11 +385,32 @@ if(response.ok) document.getElementById('submit').disabled=true;};
   }
   if (method === 'GET' && parts.join('/') === 'api/v1/areas') return send(res, 200, db.areas);
   if (method === 'POST' && parts.join('/') === 'api/v1/location/resolve') {
-    const area = db.areas.find((item) => item.id === body.areaId) || db.areas[0];
+    const coordinates = {
+      lat: Number(body.lat),
+      lng: Number(body.lng)
+    };
+    const knownAreas = [
+      { id: 'hcm', lat: 10.8231, lng: 106.6297 },
+      { id: 'hanoi', lat: 21.0278, lng: 105.8342 },
+      { id: 'danang', lat: 16.0544, lng: 108.2022 }
+    ];
+    const hasCoordinates = Number.isFinite(coordinates.lat) && Number.isFinite(coordinates.lng);
+    const nearest = hasCoordinates
+      ? knownAreas.reduce((best, candidate) => {
+          const distance = Math.hypot(
+            candidate.lat - coordinates.lat,
+            candidate.lng - coordinates.lng
+          );
+          return distance < best.distance ? { candidate, distance } : best;
+        }, { candidate: knownAreas[0], distance: Number.POSITIVE_INFINITY }).candidate
+      : null;
+    const area = db.areas.find((item) => item.id === body.areaId)
+      || db.areas.find((item) => item.id === nearest?.id)
+      || db.areas[0];
     return send(res, 200, {
       area,
-      source: body.areaId ? 'manual' : 'gps-demo',
-      coordinates: { lat: Number(body.lat) || 10.8231, lng: Number(body.lng) || 106.6297 }
+      source: hasCoordinates ? 'gps' : body.areaId ? 'manual' : 'unresolved',
+      coordinates: hasCoordinates ? coordinates : null
     });
   }
   if (method === 'GET' && parts.join('/') === 'api/v1/market/summary') {
@@ -322,15 +420,36 @@ if(response.ok) document.getElementById('submit').disabled=true;};
       area,
       updatedAt: new Date().toISOString(),
       source: 'backend-market-catalog',
-      items: ['gpu-4060', 'cpu-7600', 'ram-32-ddr5'].map((productId) => {
-        const item = product(productId);
+      items: db.products.map((item) => {
+        const productId = item.id;
         const prices = db.market[area.id][productId];
         const trend = Number((((prices.current - prices.previous) / prices.previous) * 100).toFixed(2));
         return { productId, name: item.name, price: prices.current, previousPrice: prices.previous, trend };
       })
     });
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/products') return send(res, 200, db.products.filter((item) => !url.searchParams.get('type') || item.type === url.searchParams.get('type')));
+  if (method === 'GET' && parts.join('/') === 'api/v1/products') {
+    const type = url.searchParams.get('type');
+    const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+    const maxPrice = Number(url.searchParams.get('maxPrice') || 0);
+    return send(res, 200, db.products.filter((item) =>
+      (!type || item.type === type) &&
+      (!query || `${item.name} ${item.id}`.toLowerCase().includes(query)) &&
+      (!maxPrice || item.price <= maxPrice)
+    ));
+  }
+  if (method === 'GET' && parts.join('/') === 'api/v1/compare') {
+    const ids = [...new Set((url.searchParams.get('productIds') || '').split(',').map((value) => value.trim()).filter(Boolean))];
+    if (ids.length < 2 || ids.length > 3) return send(res, 422, { error: 'INVALID_COMPARE_COUNT', message: 'Cần so sánh từ 2 đến 3 sản phẩm.' });
+    const products = ids.map((productId) => product(productId)).filter(Boolean);
+    if (products.length !== ids.length) return send(res, 404, { error: 'PRODUCT_NOT_FOUND' });
+    return send(res, 200, {
+      products,
+      fields: ['name', 'type', 'price', 'power', 'socket', 'ram', 'form', 'length', 'watts'],
+      updatedAt: new Date().toISOString(),
+      source: 'backend-market-catalog'
+    });
+  }
   if (method === 'GET' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'products' && parts[3]) {
     const item = product(parts[3]); return item ? send(res, 200, item) : send(res, 404, { error: 'PRODUCT_NOT_FOUND' });
   }
@@ -347,6 +466,42 @@ if(response.ok) document.getElementById('submit').disabled=true;};
   }
 
   const user = requireAuth(req, res); if (!user) return;
+  if (method === 'POST' && parts.join('/') === 'api/v1/auth/change-password') {
+    const currentPassword = String(body.currentPassword || '');
+    const newPassword = String(body.newPassword || '');
+    if (newPassword.length < 8) {
+      return send(res, 422, { error: 'INVALID_PASSWORD', message: 'Mật khẩu mới phải có ít nhất 8 ký tự.' });
+    }
+    const currentHash = crypto.createHash('sha256').update(currentPassword).digest('hex');
+    if (user.passwordHash !== currentHash) {
+      return send(res, 401, { error: 'INVALID_CURRENT_PASSWORD', message: 'Mật khẩu hiện tại không đúng.' });
+    }
+    user.passwordHash = crypto.createHash('sha256').update(newPassword).digest('hex');
+    saveDb();
+    return send(res, 200, { ok: true, message: 'Đã đổi mật khẩu.' });
+  }
+  if (method === 'PUT' && parts.join('/') === 'api/v1/auth/me') {
+    const name = body.name === undefined ? user.name : String(body.name).trim();
+    const areaId = body.areaId === undefined ? user.areaId : String(body.areaId);
+    if (name.length < 2) return send(res, 422, { error: 'INVALID_NAME', message: 'Tên người dùng tối thiểu 2 ký tự.' });
+    if (!db.areas.some((area) => area.id === areaId)) return send(res, 422, { error: 'INVALID_AREA', message: 'Khu vực không hợp lệ.' });
+    user.name = name;
+    user.areaId = areaId;
+    if (body.avatarUrl !== undefined) user.avatarUrl = String(body.avatarUrl).slice(0, 500);
+    if (body.preferences && typeof body.preferences === 'object') {
+      user.preferences = {
+        ...(user.preferences || {}),
+        ...(body.preferences.pricePreference === undefined
+          ? {}
+          : { pricePreference: Boolean(body.preferences.pricePreference) }),
+        ...(body.preferences.priceNotifications === undefined
+          ? {}
+          : { priceNotifications: Boolean(body.preferences.priceNotifications) })
+      };
+    }
+    saveDb();
+    return send(res, 200, publicUser(user));
+  }
   if (method === 'GET' && parts.join('/') === 'api/v1/auth/me') return send(res, 200, publicUser(user));
   if (method === 'GET' && parts.join('/') === 'api/v1/notifications') {
     return send(res, 200, db.notifications.filter((item) => item.userId === user.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
@@ -356,16 +511,19 @@ if(response.ok) document.getElementById('submit').disabled=true;};
     saveDb(); return send(res, 200, { ok: true });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/builds') {
-    const build = { id: id('build'), userId: user.id, name: body.name || 'Build mới', budget: money(body.budget), areaId: body.areaId || user.areaId, components: {} };
+    const build = { id: id('build'), userId: user.id, name: body.name || 'Build mới', budget: money(body.budget), areaId: body.areaId || user.areaId, components: {}, version: 1, status: 'draft', updatedAt: new Date().toISOString() };
     db.builds.push(build); saveDb(); return send(res, 201, buildView(build));
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/builds') return send(res, 200, db.builds.filter((item) => item.userId === user.id).map(buildView));
+  if (method === 'GET' && parts.join('/') === 'api/v1/builds') return send(res, 200, db.builds.filter((item) => item.userId === user.id).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))).map(buildView));
   if (parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'builds' && parts[3]) {
     const build = db.builds.find((item) => item.id === parts[3] && item.userId === user.id);
     if (!build) return send(res, 404, { error: 'BUILD_NOT_FOUND' });
     if (method === 'GET') return send(res, 200, buildView(build));
     if (method === 'DELETE') { db.builds = db.builds.filter((item) => item !== build); saveDb(); return send(res, 204, {}); }
     if (method === 'PUT' && parts.length === 4) {
+      if (body.expectedVersion !== undefined && Number(body.expectedVersion) !== Number(build.version || 1)) {
+        return send(res, 409, { error: 'BUILD_VERSION_CONFLICT', message: 'Cấu hình đã thay đổi ở nơi khác.', latest: buildView(build) });
+      }
       if (body.name !== undefined) {
         const name = String(body.name).trim();
         if (name.length < 2) return send(res, 422, { error: 'INVALID_BUILD_NAME', message: 'Tên cấu hình phải có ít nhất 2 ký tự.' });
@@ -373,13 +531,20 @@ if(response.ok) document.getElementById('submit').disabled=true;};
       }
       if (body.budget !== undefined) build.budget = money(body.budget);
       if (body.areaId !== undefined) build.areaId = String(body.areaId);
+      build.version = Number(build.version || 1) + 1;
+      build.updatedAt = new Date().toISOString();
       saveDb();
       return send(res, 200, buildView(build));
     }
     if (method === 'PUT' && parts[4] === 'components' && parts[5]) {
+      if (body.expectedVersion !== undefined && Number(body.expectedVersion) !== Number(build.version || 1)) {
+        return send(res, 409, { error: 'BUILD_VERSION_CONFLICT', message: 'Cấu hình đã thay đổi ở nơi khác.', latest: buildView(build) });
+      }
       const componentType = decodePathPart(parts[5]);
       if (body.productId === null || body.productId === undefined || body.productId === '') {
         delete build.components[componentType];
+        build.version = Number(build.version || 1) + 1;
+        build.updatedAt = new Date().toISOString();
         saveDb();
         return send(res, 200, buildView(build));
       }
@@ -387,15 +552,58 @@ if(response.ok) document.getElementById('submit').disabled=true;};
         return send(res, 422, { error: 'INVALID_COMPONENT', message: `Sản phẩm không thuộc loại ${componentType}.` });
       }
       build.components[componentType] = body.productId;
+      build.version = Number(build.version || 1) + 1;
+      build.updatedAt = new Date().toISOString();
       saveDb();
       return send(res, 200, buildView(build));
+    }
+    if (method === 'POST' && parts[4] === 'duplicate') {
+      const name = String(body.name || `${build.name} (bản sao)`).trim();
+      if (name.length < 2 || name.length > 60) return send(res, 422, { error: 'INVALID_BUILD_NAME' });
+      const copy = {
+        ...build,
+        id: id('build'),
+        name,
+        version: 1,
+        updatedAt: new Date().toISOString()
+      };
+      db.builds.push(copy); saveDb(); return send(res, 201, buildView(copy));
     }
     if (method === 'POST' && parts[4] === 'check') return send(res, 200, compatibility(build.components));
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/compatibility/check') return send(res, 200, compatibility(body.components || {}));
   if (method === 'POST' && parts.join('/') === 'api/v1/scans') {
-    const scan = { id: id('scan'), userId: user.id, status: 'completed', detectedProductId: 'gpu-4060', confidence: 0.96, createdAt: new Date().toISOString() };
+    const candidateIds = Array.isArray(body.candidateProductIds) ? body.candidateProductIds : [];
+    const candidates = candidateIds.map((candidateId) => product(candidateId)).filter(Boolean).map((item) => ({
+      productId: item.id,
+      model: item.name,
+      confidence: Number(body.confidenceByProduct?.[item.id] || body.confidence || 0) || null
+    }));
+    const detectedProductId = product(body.confirmedProductId)?.id || null;
+    const scan = {
+      id: id('scan'),
+      userId: user.id,
+      status: detectedProductId ? 'confirmed' : (candidates.length ? 'awaiting_confirmation' : 'pending_analysis'),
+      detectedProductId,
+      candidates,
+      confirmedByUser: Boolean(detectedProductId),
+      createdAt: new Date().toISOString()
+    };
     db.scans.push(scan); saveDb(); return send(res, 201, { ...scan, product: product(scan.detectedProductId) });
+  }
+  if (method === 'POST' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'scans' && parts[4] === 'confirm') {
+    const scan = db.scans.find((item) => item.id === parts[3] && item.userId === user.id);
+    const selected = product(body.productId);
+    if (!scan) return send(res, 404, { error: 'SCAN_NOT_FOUND' });
+    if (!selected || !scan.candidates.some((candidate) => candidate.productId === selected.id)) {
+      return send(res, 422, { error: 'INVALID_SCAN_CANDIDATE', message: 'Sản phẩm xác nhận phải nằm trong danh sách nhận diện.' });
+    }
+    scan.detectedProductId = selected.id;
+    scan.confirmedByUser = true;
+    scan.status = 'confirmed';
+    scan.confirmedAt = new Date().toISOString();
+    saveDb();
+    return send(res, 200, { ...scan, product: selected });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/conversations') {
     const conversation = { id: id('conversation'), userId: user.id, messages: [] }; db.conversations.push(conversation); saveDb(); return send(res, 201, conversation);
@@ -403,14 +611,37 @@ if(response.ok) document.getElementById('submit').disabled=true;};
   if (method === 'POST' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'conversations' && parts[4] === 'messages') {
     const conversation = db.conversations.find((item) => item.id === parts[3] && item.userId === user.id);
     if (!conversation) return send(res, 404, { error: 'CONVERSATION_NOT_FOUND' });
-    const answer = `BuildMate: ${body.message || 'Hãy nhập câu hỏi.'} — đây là tư vấn demo dựa trên catalog hiện tại.`;
-    conversation.messages.push({ role: 'user', content: body.message, createdAt: new Date().toISOString() }, { role: 'assistant', content: answer, createdAt: new Date().toISOString() });
-    saveDb(); return send(res, 200, { answer, messages: conversation.messages });
+    const message = String(body.message || '').trim();
+    if (!message) return send(res, 422, { error: 'INVALID_MESSAGE', message: 'Nội dung tư vấn không được để trống.' });
+    conversation.messages.push({ role: 'user', content: message, createdAt: new Date().toISOString() });
+    saveDb();
+    return send(res, 503, {
+      error: 'AI_PROVIDER_REQUIRED',
+      message: 'Hãy cấu hình LM Studio để nhận câu trả lời tư vấn.'
+    });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/price-alerts') {
     const alert = { id: id('alert'), userId: user.id, productId: body.productId, targetPrice: money(body.targetPrice), areaId: body.areaId || user.areaId }; db.alerts.push(alert); saveDb(); return send(res, 201, alert);
   }
   if (method === 'GET' && parts.join('/') === 'api/v1/price-alerts') return send(res, 200, db.alerts.filter((item) => item.userId === user.id));
+  if (method === 'GET' && parts.join('/') === 'api/v1/faq') {
+    const query = String(url.searchParams.get('q') || '').trim().toLowerCase();
+    const faq = [
+      { id: 'faq-location', topic: 'location', question: 'Làm sao đổi khu vực?', answer: 'Mở Tài khoản > Khu vực và xác nhận vị trí mới.' },
+      { id: 'faq-build', topic: 'build', question: 'Cấu hình được lưu ở đâu?', answer: 'Cấu hình được lưu theo tài khoản sau khi máy chủ xác nhận.' },
+      { id: 'faq-compatibility', topic: 'compatibility', question: 'Tại sao linh kiện chưa kiểm tra được?', answer: 'Thiếu thông số catalog sẽ được đánh dấu chưa đủ dữ liệu, không tự coi là tương thích.' }
+    ];
+    return send(res, 200, faq.filter((item) => !query || `${item.topic} ${item.question} ${item.answer}`.toLowerCase().includes(query)));
+  }
+  if (method === 'POST' && parts.join('/') === 'api/v1/support-requests') {
+    const message = String(body.message || '').trim();
+    const email = String(body.contactEmail || user.email || '').trim();
+    if (!email.includes('@')) return send(res, 422, { error: 'INVALID_EMAIL' });
+    if (message.length < 10 || message.length > 2000) return send(res, 422, { error: 'INVALID_MESSAGE', message: 'Nội dung hỗ trợ phải từ 10 đến 2.000 ký tự.' });
+    const request = { id: id('support'), userId: user.id, topic: String(body.topic || 'general'), contactEmail: email, message, status: 'received', createdAt: new Date().toISOString() };
+    db.supportRequests.push(request); saveDb();
+    return send(res, 201, request);
+  }
   return send(res, 404, { error: 'NOT_FOUND' });
 }
 

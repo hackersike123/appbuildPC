@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'config/ai_config.dart';
+
 class ApiException implements Exception {
   ApiException(this.message, {this.statusCode});
   final String message;
@@ -18,14 +20,12 @@ class ApiClient {
   Map<String, dynamic>? currentUser;
   String? buildId;
   final productIdsByName = <String, String>{};
+  final productPowerByName = <String, int>{};
 
   String get baseUrl {
     const configuredUrl = String.fromEnvironment('API_BASE_URL');
     if (configuredUrl.isNotEmpty) return configuredUrl;
     if (kIsWeb) return 'http://localhost:3000';
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      return 'http://10.0.2.2:3000';
-    }
     return 'http://localhost:3000';
   }
 
@@ -37,23 +37,44 @@ class ApiClient {
   }) async {
     final headers = <String, String>{'content-type': 'application/json'};
     if (auth && token != null) {
-      headers['authorization'] = 'Bearer ${token!}';
+      headers['authorization'] = 'Bearer $token';
+    }
+    if (baseUrl.contains('ngrok')) {
+      headers['ngrok-skip-browser-warning'] = 'true';
     }
     final request = http.Request(method, Uri.parse('$baseUrl$path'))
       ..headers.addAll(headers);
     if (body != null) request.body = jsonEncode(body);
-    final response = await http.Client()
-        .send(request)
-        .timeout(const Duration(seconds: 8));
-    final text = await response.stream.bytesToString();
-    final data = text.isEmpty ? null : jsonDecode(text);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final message = data is Map
-          ? data['message'] ?? data['error']
-          : 'API request failed';
-      throw ApiException(message.toString(), statusCode: response.statusCode);
+    final client = http.Client();
+    try {
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 8));
+      final text = await response.stream.bytesToString().timeout(
+        const Duration(seconds: 8),
+      );
+      dynamic data;
+      if (text.isNotEmpty) {
+        try {
+          data = jsonDecode(text);
+        } on FormatException {
+          throw ApiException(
+            'API trả về dữ liệu không hợp lệ (HTTP ${response.statusCode}). '
+            'Hãy kiểm tra URL backend và đường hầm ngrok.',
+            statusCode: response.statusCode,
+          );
+        }
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final message = data is Map
+            ? data['message'] ?? data['error']
+            : 'API request failed';
+        throw ApiException(message.toString(), statusCode: response.statusCode);
+      }
+      return data;
+    } finally {
+      client.close();
     }
-    return data;
   }
 
   Future<Map<String, dynamic>> login(String email, String password) async {
@@ -114,10 +135,57 @@ class ApiClient {
     );
   }
 
+  Future<void> changePassword(
+    String currentPassword,
+    String newPassword,
+  ) async {
+    await _request(
+      'POST',
+      '/api/v1/auth/change-password',
+      auth: true,
+      body: {'currentPassword': currentPassword, 'newPassword': newPassword},
+    );
+  }
+
   Future<Map<String, dynamic>> me() async {
     final data = await _request('GET', '/api/v1/auth/me', auth: true);
     currentUser = Map<String, dynamic>.from(data as Map);
     return currentUser!;
+  }
+
+  Future<Map<String, dynamic>> updateProfile({
+    String? name,
+    String? areaId,
+    String? avatarUrl,
+    bool? pricePreference,
+    bool? priceNotifications,
+  }) async {
+    final data = Map<String, dynamic>.from(
+      await _request(
+        'PUT',
+        '/api/v1/auth/me',
+        auth: true,
+        body: {
+          ...?name == null ? null : {'name': name},
+          ...?areaId == null ? null : {'areaId': areaId},
+          ...?avatarUrl == null ? null : {'avatarUrl': avatarUrl},
+          ...?(pricePreference == null && priceNotifications == null)
+              ? null
+              : {
+                  'preferences': {
+                    ...?pricePreference == null
+                        ? null
+                        : {'pricePreference': pricePreference},
+                    ...?priceNotifications == null
+                        ? null
+                        : {'priceNotifications': priceNotifications},
+                  },
+                },
+        },
+      ),
+    );
+    currentUser = data;
+    return data;
   }
 
   void logout() {
@@ -137,14 +205,32 @@ class ApiClient {
     await _request('POST', '/api/v1/notifications/read', auth: true);
   }
 
-  Future<List<Map<String, dynamic>>> products(String type) async {
+  Future<List<Map<String, dynamic>>> products(
+    String type, {
+    String query = '',
+    int? maxPrice,
+  }) async {
+    final params = <String, String>{'type': type};
+    if (query.trim().isNotEmpty) params['q'] = query.trim();
+    if (maxPrice != null) params['maxPrice'] = '$maxPrice';
     final data = await _request(
       'GET',
-      '/api/v1/products?type=${Uri.encodeQueryComponent(type)}',
+      '/api/v1/products?${params.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}',
     );
     return (data as List)
         .map((item) => Map<String, dynamic>.from(item))
         .toList();
+  }
+
+  Future<Map<String, dynamic>> compareProducts(List<String> productIds) async {
+    if (productIds.length < 2 || productIds.length > 3) {
+      throw ApiException('Cần chọn từ 2 đến 3 sản phẩm để so sánh.');
+    }
+    final data = await _request(
+      'GET',
+      '/api/v1/compare?productIds=${productIds.map(Uri.encodeQueryComponent).join(',')}',
+    );
+    return Map<String, dynamic>.from(data as Map);
   }
 
   Future<List<Map<String, dynamic>>> areas() async {
@@ -154,12 +240,20 @@ class ApiClient {
         .toList();
   }
 
-  Future<Map<String, dynamic>> resolveLocation({String? areaId}) async {
+  Future<Map<String, dynamic>> resolveLocation({
+    String? areaId,
+    double? lat,
+    double? lng,
+  }) async {
     return Map<String, dynamic>.from(
       await _request(
         'POST',
         '/api/v1/location/resolve',
-        body: areaId == null ? {} : {'areaId': areaId},
+        body: {
+          ...?areaId == null ? null : {'areaId': areaId},
+          ...?lat == null ? null : {'lat': lat},
+          ...?lng == null ? null : {'lng': lng},
+        },
       ),
     );
   }
@@ -171,7 +265,7 @@ class ApiClient {
   }
 
   Future<Map<String, dynamic>> createBuild({
-    String name = 'Gaming 20 triệu',
+    String name = 'Build mới',
     int budget = 20000000,
     String areaId = 'hcm',
   }) async {
@@ -207,15 +301,23 @@ class ApiClient {
 
   Future<Map<String, dynamic>> updateComponent(
     String type,
-    String? productId,
-  ) async {
+    String? productId, {
+    int? expectedVersion,
+  }) async {
     if (buildId == null) await createBuild();
-    final data = Map<String, dynamic>.from(await _request(
-      'PUT',
-      '/api/v1/builds/$buildId/components/${Uri.encodeComponent(type)}',
-      auth: true,
-      body: {'productId': productId},
-    ));
+    final data = Map<String, dynamic>.from(
+      await _request(
+        'PUT',
+        '/api/v1/builds/$buildId/components/${Uri.encodeComponent(type)}',
+        auth: true,
+        body: {
+          'productId': productId,
+          ...?expectedVersion == null
+              ? null
+              : {'expectedVersion': expectedVersion},
+        },
+      ),
+    );
     buildId = data['id'] as String? ?? buildId;
     return data;
   }
@@ -225,20 +327,31 @@ class ApiClient {
     String? name,
     int? budget,
     String? areaId,
+    int? expectedVersion,
   }) async {
     final body = <String, dynamic>{};
     if (name != null) body['name'] = name;
     if (budget != null) body['budget'] = budget;
     if (areaId != null) body['areaId'] = areaId;
+    if (expectedVersion != null) body['expectedVersion'] = expectedVersion;
     final data = Map<String, dynamic>.from(
-      await _request(
-        'PUT',
-        '/api/v1/builds/$id',
-        auth: true,
-        body: body,
-      ),
+      await _request('PUT', '/api/v1/builds/$id', auth: true, body: body),
     );
     buildId = data['id'] as String? ?? buildId;
+    return data;
+  }
+
+  Future<Map<String, dynamic>> duplicateBuild(String id, {String? name}) async {
+    final data = Map<String, dynamic>.from(
+      await _request(
+        'POST',
+        '/api/v1/builds/$id/duplicate',
+        auth: true,
+        body: {
+          ...?name == null ? null : {'name': name},
+        },
+      ),
+    );
     return data;
   }
 
@@ -260,6 +373,64 @@ class ApiClient {
     );
   }
 
+  Future<Map<String, dynamic>> createScan({
+    required List<String> candidateProductIds,
+    Map<String, double> confidenceByProduct = const {},
+  }) async {
+    final data = await _request(
+      'POST',
+      '/api/v1/scans',
+      auth: true,
+      body: {
+        'candidateProductIds': candidateProductIds,
+        'confidenceByProduct': confidenceByProduct,
+      },
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<Map<String, dynamic>> confirmScan(
+    String scanId,
+    String productId,
+  ) async {
+    final data = await _request(
+      'POST',
+      '/api/v1/scans/$scanId/confirm',
+      auth: true,
+      body: {'productId': productId},
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> faq({String query = ''}) async {
+    final data = await _request(
+      'GET',
+      '/api/v1/faq?q=${Uri.encodeQueryComponent(query)}',
+      auth: true,
+    );
+    return (data as List)
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> submitSupportRequest({
+    required String message,
+    String topic = 'general',
+    String? contactEmail,
+  }) async {
+    final data = await _request(
+      'POST',
+      '/api/v1/support-requests',
+      auth: true,
+      body: {
+        'message': message,
+        'topic': topic,
+        ...?contactEmail == null ? null : {'contactEmail': contactEmail},
+      },
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
   Future<Map<String, dynamic>> sendMessage(
     String conversationId,
     String message,
@@ -272,5 +443,57 @@ class ApiClient {
         body: {'message': message},
       ),
     );
+  }
+
+  Future<String> sendLmStudioMessage(
+    String message, {
+    List<Map<String, String>> history = const [],
+  }) async {
+    if (!AIConfig.enabled) {
+      throw ApiException('LM Studio đang bị tắt trong cấu hình ứng dụng.');
+    }
+    final messages = <Map<String, String>>[
+      {
+        'role': 'system',
+        'content': 'Bạn là BuildMate AI, trợ lý tư vấn linh kiện PC. Trả lời bằng tiếng Việt, ngắn gọn và không bịa giá nếu không có dữ liệu.',
+      },
+      ...history.take(10),
+      {'role': 'user', 'content': message},
+    ];
+    final headers = <String, String>{'content-type': 'application/json'};
+    if (AIConfig.apiKey.isNotEmpty) {
+      headers['authorization'] = 'Bearer $token';
+    }
+    final response = await http
+        .post(
+          Uri.parse(
+            '${AIConfig.baseUrl.replaceAll(RegExp(r'/$'), '')}/chat/completions',
+          ),
+          headers: headers,
+          body: jsonEncode({
+            'model': AIConfig.model,
+            'messages': messages,
+            'temperature': 0.4,
+            'stream': false,
+          }),
+        )
+        .timeout(const Duration(seconds: 90));
+    final text = response.body.isEmpty ? null : jsonDecode(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final error = text is Map && text['error'] is Map
+          ? (text['error']['message'] ?? text['error']['type'])
+          : 'LM Studio trả về HTTP ${response.statusCode}.';
+      throw ApiException(error.toString(), statusCode: response.statusCode);
+    }
+    if (text is! Map ||
+        text['choices'] is! List ||
+        (text['choices'] as List).isEmpty) {
+      throw ApiException('LM Studio không trả về nội dung trả lời hợp lệ.');
+    }
+    final content = (text['choices'][0] as Map)['message'];
+    if (content is! Map || content['content'] is! String) {
+      throw ApiException('LM Studio không trả về message content.');
+    }
+    return content['content'] as String;
   }
 }

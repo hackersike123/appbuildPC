@@ -27,8 +27,12 @@
           "budget": { "type": "integer" },
           "areaId": { "type": "string" },
           "components": { "type": "object" },
+          "version": { "type": "integer", "minimum": 1 },
+          "syncState": { "type": "string", "enum": ["synced", "stale", "conflict"] },
           "totalPrice": { "type": "integer" },
-          "completion": { "type": "integer" }
+          "completion": { "type": "integer" },
+          "estimatedPower": { "type": "integer" },
+          "recommendedPsu": { "type": "integer" }
         }
       }
     }
@@ -112,8 +116,46 @@
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "type", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["productId"], "properties": { "productId": { "type": "string", "nullable": true, "description": "Product ID to add/replace; null removes this component." } } } } } },
-        "responses": { "200": { "description": "Updated build" } }
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["productId"], "properties": { "productId": { "type": "string", "nullable": true, "description": "Product ID to add/replace; null removes this component." }, "expectedVersion": { "type": "integer" } } } } } },
+        "responses": { "200": { "description": "Updated build" }, "409": { "description": "Version conflict" } }
+      }
+    },
+    "/api/v1/builds/{id}/duplicate": {
+      "post": {
+        "summary": "Duplicate a saved build",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "201": { "description": "Duplicated build" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/v1/compare": {
+      "get": {
+        "summary": "Compare two or three catalog products",
+        "parameters": [{ "name": "productIds", "in": "query", "required": true, "schema": { "type": "string", "description": "Comma-separated product IDs" } }],
+        "responses": { "200": { "description": "Comparison result" }, "422": { "description": "Invalid product count" } }
+      }
+    },
+    "/api/v1/scans/{id}/confirm": {
+      "post": {
+        "summary": "Confirm an AI scan candidate",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["productId"], "properties": { "productId": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Confirmed scan" }, "422": { "description": "Candidate is invalid" } }
+      }
+    },
+    "/api/v1/faq": {
+      "get": {
+        "summary": "Search frequently asked questions",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "FAQ entries" } }
+      }
+    },
+    "/api/v1/support-requests": {
+      "post": {
+        "summary": "Create a support request",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "201": { "description": "Support request received" }, "422": { "description": "Invalid request" } }
       }
     },
     "/api/v1/notifications": {
