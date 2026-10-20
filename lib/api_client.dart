@@ -34,6 +34,7 @@ class ApiClient {
     String path, {
     Map<String, dynamic>? body,
     bool auth = false,
+    Duration? timeout = const Duration(seconds: 8),
   }) async {
     final headers = <String, String>{'content-type': 'application/json'};
     if (auth && token != null) {
@@ -47,12 +48,12 @@ class ApiClient {
     if (body != null) request.body = jsonEncode(body);
     final client = http.Client();
     try {
-      final response = await client
-          .send(request)
-          .timeout(const Duration(seconds: 8));
-      final text = await response.stream.bytesToString().timeout(
-        const Duration(seconds: 8),
-      );
+      final response = timeout == null
+          ? await client.send(request)
+          : await client.send(request).timeout(timeout);
+      final text = timeout == null
+          ? await response.stream.bytesToString()
+          : await response.stream.bytesToString().timeout(timeout);
       dynamic data;
       if (text.isNotEmpty) {
         try {
@@ -464,27 +465,13 @@ class ApiClient {
     if (AIConfig.apiKey.isNotEmpty) {
       headers['authorization'] = 'Bearer $token';
     }
-    final response = await http
-        .post(
-          Uri.parse(
-            '${AIConfig.baseUrl.replaceAll(RegExp(r'/$'), '')}/chat/completions',
-          ),
-          headers: headers,
-          body: jsonEncode({
-            'model': AIConfig.model,
-            'messages': messages,
-            'temperature': 0.4,
-            'stream': false,
-          }),
-        )
-        .timeout(const Duration(seconds: 90));
-    final text = response.body.isEmpty ? null : jsonDecode(response.body);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final error = text is Map && text['error'] is Map
-          ? (text['error']['message'] ?? text['error']['type'])
-          : 'LM Studio trả về HTTP ${response.statusCode}.';
-      throw ApiException(error.toString(), statusCode: response.statusCode);
-    }
+    final text = await _request(
+      'POST',
+      '/api/v1/ai/chat',
+      auth: true,
+      body: {'messages': messages},
+      timeout: null,
+    );
     if (text is! Map ||
         text['choices'] is! List ||
         (text['choices'] as List).isEmpty) {

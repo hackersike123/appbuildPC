@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const testDbFile = path.join(os.tmpdir(), `pcbuild-local-api-test-${process.pid}.json`);
 process.env.PCBUILD_DB_FILE = testDbFile;
+process.env.PCBUILD_USE_SQL = 'false';
 const { server, db } = require('./server');
 
 test('register, login, build and compatibility flow', async () => {

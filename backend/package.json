@@ -2,13 +2,15 @@
   "name": "pcbuild-local-api",
   "private": true,
   "version": "1.0.0",
-  "description": "Simple API for the PCBUILD LOCAL demo",
+  "description": "PCBUILD LOCAL API with SQL Server persistence",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "migrate:json-to-sql": "node migrate-json-to-sql.js"
   },
   "dependencies": {
     "dotenv": "^18.0.7",
+    "mssql": "^12.7.10",
     "nodemailer": "^10.0.16"
   }
 }

@@ -1,6 +1,7 @@
 # PCBUILD LOCAL API
 
-API Node.js native HTTP, lưu dữ liệu MVP trong `data.json`.
+API Node.js native HTTP. Khi có đủ biến `MSSQL_*`, dữ liệu được lưu trong SQL
+Server; nếu không có cấu hình SQL, test vẫn dùng file `data.json`.
 
 ## Chạy và kiểm thử
 
@@ -55,6 +56,45 @@ Biến môi trường:
 | `JWT_SECRET` | secret dev | Bắt buộc đổi khi public |
 | `JWT_EXPIRES_IN` | `3600` | Thời hạn JWT, tính bằng giây |
 | `PCBUILD_DB_FILE` | `backend/data.json` | File dữ liệu; dùng file tạm khi test |
+| `MSSQL_SERVER` | - | Hostname SQL Server |
+| `MSSQL_PORT` | - | Cổng SQL Server |
+| `MSSQL_DATABASE` | - | Tên database |
+| `MSSQL_USER` | - | Tài khoản SQL Server |
+| `MSSQL_PASSWORD` | - | Mật khẩu, chỉ đặt trong `.env` |
+| `MSSQL_ENCRYPT` | `false` | Bật TLS khi máy chủ yêu cầu |
+| `MSSQL_TRUST_SERVER_CERTIFICATE` | `false` | Tin chứng chỉ tự ký |
+
+### Kết nối SQL Server
+
+Tạo `backend/.env` từ `.env.example`, sau đó đặt mật khẩu cục bộ. Không commit
+file `.env`. API tự tạo bảng `dbo.pcbuild_app_state` khi khởi động và giữ
+toàn bộ dữ liệu domain trong JSON payload để không thay đổi hợp đồng API trong
+giai đoạn chuyển persistence. Script SQL tương ứng nằm tại
+`backend/sql-schema.sql`.
+
+Kiểm tra kết nối:
+
+```powershell
+cd backend
+node --env-file=.env -e "const sql=require('mssql'); sql.connect({server:process.env.MSSQL_SERVER,port:Number(process.env.MSSQL_PORT),user:process.env.MSSQL_USER,password:process.env.MSSQL_PASSWORD,database:process.env.MSSQL_DATABASE,options:{encrypt:process.env.MSSQL_ENCRYPT==='true',trustServerCertificate:process.env.MSSQL_TRUST_SERVER_CERTIFICATE==='true'}}).then(async pool=>{console.log('SQL Server connected'); await pool.close()}).catch(error=>{console.error(error.message);process.exit(1)})"
+```
+
+Khởi động API:
+
+```powershell
+npm start
+```
+
+Nhập dữ liệu cũ từ `data.json` vào SQL Server theo chế độ merge:
+
+```powershell
+npm run migrate:json-to-sql
+```
+
+Lệnh này không xóa dữ liệu SQL Server và không ghi đè bản ghi đã có cùng
+`id`. Sau khi nhập, API chỉ đọc/ghi trạng thái ứng dụng trong SQL Server khi
+đủ cấu hình `MSSQL_*`; `data.json` chỉ còn là nguồn migration và fallback cho
+test không bật SQL.
 
 Không commit `JWT_SECRET` hoặc dữ liệu tài khoản thật.
 

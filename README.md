@@ -1,179 +1,281 @@
 # PCBUILD LOCAL
 
-Ứng dụng Flutter hỗ trợ xây dựng cấu hình PC theo khu vực, tham khảo giá linh
-kiện, kiểm tra tương thích, quét linh kiện và tư vấn cấu hình. Web và Android
-dùng chung REST API Node.js; tài khoản và build được phân quyền bằng JWT.
+PCBUILD LOCAL là ứng dụng Flutter cho Web và Android, giúp người dùng xây
+dựng cấu hình PC theo khu vực, tham khảo giá linh kiện, kiểm tra tương thích,
+lưu build theo tài khoản, quét linh kiện và hỏi trợ lý BuildMate AI.
 
-## Tính năng hiện có
-
-- Luồng Chào mừng, đăng nhập, đăng ký và khôi phục mật khẩu.
-- Xin quyền vị trí và camera thật trên Android; từ chối quyền vẫn không chặn demo.
-- Xây cấu hình theo từng linh kiện: CPU, mainboard, GPU, RAM, SSD, PSU, case và
-  tản nhiệt.
-- Tự tính tổng giá, báo thiếu linh kiện và mở báo cáo tương thích.
-- Danh sách build theo tài khoản, thông báo theo tài khoản, tư vấn BuildMate và giao diện khớp các frame Figma.
-- Chạy trên Web và Android từ một codebase Flutter.
-
-## Yêu cầu môi trường
-
-- Flutter stable (Dart SDK theo `pubspec.yaml`).
-- Android SDK cho Android build.
-- Chrome hoặc Edge nếu chạy Web.
-
-## Chạy dự án
-
-```bash
-flutter pub get
-flutter analyze
-flutter test
-flutter run -d chrome
-flutter run -d <android-device-id>
-```
-
-Build phát hành thử:
-
-```bash
-flutter build web
-flutter build apk --debug
-```
-
-## Cấu trúc chính
+## Kiến trúc hiện tại
 
 ```text
-lib/main.dart                 # UI, navigation và demo state
-test/widget_test.dart         # Widget/regression tests
-assets/figma/                 # Asset local từ thiết kế
-android/app/src/main/         # Android manifest và quyền thiết bị
-.github/workflows/            # CI tự động trên GitHub Actions
-backend/                      # API demo Node.js + JSON database
+Flutter Web / Android
+        |
+        | REST + JWT
+        v
+Node.js API (backend/)
+   |                |
+   |                +--> LM Studio local hoặc tunnel ngrok
+   |
+   +--> SQL Server (runtime persistence)
 ```
 
-## Quyền thiết bị
+- Flutter là client duy nhất cho Web và Android.
+- Backend Node.js cung cấp REST API, xác thực JWT, build, sản phẩm, giá,
+  thông báo, scanner, hỗ trợ và proxy AI.
+- Khi có đủ biến `MSSQL_*`, backend đọc/ghi dữ liệu trong SQL Server.
+- `data.json` chỉ là nguồn migration và fallback cho test không bật SQL.
+- Flutter gọi `/api/v1/ai/chat`; backend gọi LM Studio server-side để tránh
+  lỗi CORS và không lộ cấu hình AI trực tiếp trong trình duyệt.
 
-Android khai báo camera và vị trí khi dùng ứng dụng. App gọi quyền hệ điều hành
-thật qua `permission_handler`; nếu quyền bị từ chối, app dùng dữ liệu mẫu và
-tiếp tục chạy để phục vụ demo.
+## Tính năng
 
-## Giới hạn MVP
+- Đăng ký, đăng nhập, JWT và khôi phục mật khẩu qua SMTP.
+- Xác định khu vực bằng GPS và xin quyền camera trên Android.
+- Chọn CPU, mainboard, GPU, RAM, SSD, PSU, case và tản nhiệt.
+- Tính tổng giá, công suất, tiến độ build và kiểm tra tương thích.
+- Lưu, mở, cập nhật, nhân bản và xóa build theo đúng tài khoản.
+- Giá tham khảo theo khu vực, so sánh sản phẩm và theo dõi biến động giá.
+- Quét linh kiện bằng camera/thư viện ảnh.
+- Chat BuildMate AI và kiểm tra model LM Studio.
+- Giao diện Flutter bám theo thiết kế Figma.
 
-Backend, xác thực tài khoản, build theo tài khoản, khu vực và API giá MVP đã
-được kết nối. Catalog giá hiện được lưu trong JSON và cập nhật theo dữ liệu
-MVP; camera scanner, chatbot và đồng bộ giá từ nhà cung cấp bên ngoài vẫn là
-các phần mở rộng tiếp theo.
+## Yêu cầu
 
-## Quy trình đóng góp
+- Flutter stable và Dart theo `pubspec.yaml`.
+- Android SDK nếu chạy trên Android.
+- Chrome hoặc Edge nếu chạy Web.
+- Node.js hỗ trợ `--env-file` (Node 20+ khuyến nghị).
+- SQL Server nếu chạy persistence production.
+- LM Studio chỉ bắt buộc khi dùng chat hoặc scanner AI.
 
-1. Tạo branch từ `main`, ví dụ `feature/component-picker`.
-2. Chạy `flutter analyze` và `flutter test`.
-3. Cập nhật README/test khi thay đổi hành vi.
-4. Tạo Pull Request vào `main`, mô tả thay đổi và kết quả kiểm thử.
+## Cài đặt
 
-Xem thêm [CONTRIBUTING.md](CONTRIBUTING.md).
+Tại thư mục repository:
 
-## API và public demo
+```powershell
+flutter pub get
+```
 
-```bash
+Cài backend:
+
+```powershell
+cd backend
+npm install
+```
+
+Tạo `backend/.env` từ [backend/.env.example](backend/.env.example), sau đó
+điền các giá trị thật. Không commit `backend/.env`.
+
+## Cấu hình backend
+
+Các biến SQL Server runtime:
+
+```env
+PORT=3000
+MSSQL_REQUIRED=true
+MSSQL_SERVER=hackersike123.ddns.net
+MSSQL_PORT=46494
+MSSQL_DATABASE=PCBuildLocal
+MSSQL_USER=tuan_dev
+MSSQL_PASSWORD=<sql-password>
+MSSQL_ENCRYPT=true
+MSSQL_TRUST_SERVER_CERTIFICATE=true
+MSSQL_CONNECTION_TIMEOUT=10000
+MSSQL_REQUEST_TIMEOUT=10000
+```
+
+Các biến AI backend:
+
+```env
+LM_STUDIO_URL=http://localhost:3105/v1
+LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+# LM_STUDIO_API_KEY=<optional>
+```
+
+`MSSQL_TRUST_SERVER_CERTIFICATE=true` phù hợp với chứng chỉ tự ký khi demo.
+Production nên dùng chứng chỉ hợp lệ hoặc cấu hình mạng riêng an toàn hơn.
+
+## Chạy backend
+
+```powershell
+cd backend
+node --env-file=.env server.js
+```
+
+Hoặc:
+
+```powershell
 cd backend
 npm start
 ```
 
-Swagger UI: `http://localhost:3000/docs`. Hướng dẫn JWT, CRUD, VS Code Port
-Forwarding và Gmail SMTP tại [backend/README.md](backend/README.md).
+Kiểm tra:
 
-## Kết nối AI local bằng LM Studio và ngrok
-
-Màn hình BuildMate gọi trực tiếp API OpenAI-compatible của LM Studio:
-
-```text
-POST <LM_STUDIO_URL>/chat/completions
+```powershell
+Invoke-RestMethod http://localhost:3000/health
 ```
 
-Mục **Tài khoản > Kiểm tra kết nối LM Studio** có thể lấy danh sách model và
-gửi một câu hỏi thử. Màn hình **Nhận diện linh kiện** cho phép chụp ảnh hoặc
-chọn ảnh từ thư viện rồi gửi ảnh tới model Vision đang chạy.
+Kết quả mong đợi:
 
-Trong LM Studio, tải model, mở **Developer > Local Server**, chọn model rồi
-bấm **Start Server**. Bật CORS nếu chạy Flutter Web. Kiểm tra:
+```json
+{"ok":true,"service":"pcbuild-local-api"}
+```
+
+Swagger UI: <http://localhost:3000/docs>
+OpenAPI JSON: <http://localhost:3000/openapi.json>
+
+## Migration dữ liệu cũ
+
+Migration merge dữ liệu từ `backend/data.json` vào SQL Server:
+
+```powershell
+cd backend
+npm run migrate:json-to-sql
+```
+
+Script không xóa dữ liệu hiện có và giữ bản ghi SQL Server khi trùng `id`.
+Backend tự tạo bảng `dbo.pcbuild_app_state` nếu bảng chưa tồn tại. Hiện trạng
+dữ liệu được lưu trong một JSON payload để giữ nguyên hợp đồng API trong giai
+đoạn chuyển đổi persistence.
+
+## Chạy Flutter Web
+
+### Local hoàn toàn
+
+Nếu backend và LM Studio chạy trên cùng máy:
+
+```powershell
+flutter run -d chrome `
+  --dart-define=API_BASE_URL=http://localhost:3000 `
+  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Backend `.env` dùng:
+
+```env
+LM_STUDIO_URL=http://localhost:3105/v1
+```
+
+### Web qua backend ngrok
+
+Khi backend được public bằng URL ngrok:
+
+```powershell
+flutter run -d chrome `
+  --dart-define=API_BASE_URL=https://broiler-ocean-twistable.ngrok-free.dev `
+  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Chrome chỉ gọi backend. Không cần truyền `LM_STUDIO_URL` cho Flutter vì backend
+proxy request AI, tránh lỗi `Failed to fetch` do CORS.
+
+## Chạy Android
+
+Liệt kê thiết bị:
+
+```powershell
+flutter devices
+```
+
+Chạy thiết bị thật qua API public:
+
+```powershell
+flutter run -d dc3b582c `
+  --dart-define=API_BASE_URL=https://broiler-ocean-twistable.ngrok-free.dev `
+  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```
+
+Thay `dc3b582c` bằng device ID thực tế. Không dùng `localhost` hoặc
+`127.0.0.1` trên điện thoại thật; điện thoại cần truy cập được URL public.
+
+## LM Studio và AI local
+
+Trong LM Studio:
+
+1. Mở **Developer > Local Server**.
+2. Chọn model `qwen3-vl-8b-instruct`.
+3. Bấm **Start Server**.
+4. Kiểm tra server:
 
 ```powershell
 Invoke-RestMethod http://localhost:3105/v1/models
 ```
 
-Chạy Flutter với LM Studio local:
+Chat AI có thể mất lâu khi model đang tải hoặc chạy trên phần cứng hạn chế.
+Client không đặt timeout cho request AI; các API thông thường vẫn có timeout
+ngắn để phát hiện backend không phản hồi.
+
+Nếu dùng tunnel:
 
 ```powershell
-flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:3000 --dart-define=LM_STUDIO_URL=http://localhost:3105/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
-```
-
-Với cấu hình public hiện tại, backend và LM Studio được giữ local, còn client
-truy cập qua hai tunnel ngrok:
-
-```powershell
-flutter run -d chrome --dart-define=LM_STUDIO_URL=https://pillowlike-poikilitic-ciara.ngrok-free.dev/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
-```
-
-Android Emulator hoặc điện thoại thật dùng API public qua ngrok:
-
-```powershell
-flutter run -d <device-id> `
-  --dart-define=API_BASE_URL=https://broiler-ocean-twistable.ngrok-free.dev `
-  --dart-define=LM_STUDIO_URL=https://pillowlike-poikilitic-ciara.ngrok-free.dev/v1 `
-  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
-```
-
-Điện thoại thật hoặc máy ngoài mạng dùng ngrok:
-
-```powershell
-ngrok http 1234
-flutter run -d <device-id> --dart-define=LM_STUDIO_URL=https://<ngrok-id>.ngrok-free.app/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
-```
-
-Không dùng `localhost` hoặc `127.0.0.1` trên điện thoại thật. URL ngrok chỉ
-hoạt động khi LM Studio và ngrok vẫn đang chạy. Không public LM Studio lâu dài
-vì URL này cho phép người có đường dẫn gọi model trên máy của bạn; nên giới
-hạn truy cập ngrok hoặc chỉ dùng trong lúc demo.
-
-Có thể truyền API key nếu server LM Studio/ngrok yêu cầu:
-
-```powershell
-flutter run -d chrome --dart-define=LM_STUDIO_URL=https://<ngrok-id>.ngrok-free.app/v1 --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct --dart-define=LM_STUDIO_API_KEY=<key>
-```
-
-Các biến cấu hình được khai báo trong
-`lib/config/ai_config.dart`: `LM_STUDIO_URL`, `LM_STUDIO_MODEL`,
-`LM_STUDIO_API_KEY` và `LM_STUDIO_ENABLED`.
-
-## Chạy local và public bằng ngrok
-
-Backend và LM Studio chạy local trên cùng máy:
-
-```powershell
-# Terminal 1 - backend local
-cd backend
-npm start
-
-# Terminal 2 - LM Studio local
-# LM Studio Local Server: localhost:3105
-
-# Terminal 3 - public backend
 ngrok http 3000
-
-# Terminal 4 - public LM Studio
 ngrok http 3105
 ```
 
-## Lệnh chạy Android qua API public
+Đặt URL LM Studio tunnel trong `backend/.env`:
 
-Thay `dc3b582c` bằng device ID hiển thị trong `flutter devices` nếu cần.
-
-```powershell
-flutter run -d dc3b582c `
-  --dart-define=API_BASE_URL=https://broiler-ocean-twistable.ngrok-free.dev `
-  --dart-define=LM_STUDIO_URL=https://pillowlike-poikilitic-ciara.ngrok-free.dev/v1 `
-  --dart-define=LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+```env
+LM_STUDIO_URL=https://<lm-studio-tunnel>/v1
 ```
 
-Lệnh trên dùng cả backend và LM Studio qua public API.
+Chỉ public tunnel trong thời gian demo và không đưa secret vào command hoặc
+repository.
 
-Lệnh trên dùng backend và LM Studio qua public API, không dùng địa chỉ LAN.
-Hai tunnel ngrok và hai dịch vụ local phải đang chạy trước khi khởi động app.
+## Kiểm thử và build
+
+Flutter:
+
+```powershell
+flutter analyze
+flutter test
+flutter build web
+flutter build apk --debug
+```
+
+Backend:
+
+```powershell
+cd backend
+npm test
+node --check server.js
+node --check sql-store.js
+git diff --check
+```
+
+CI tại [.github/workflows/ci.yml](.github/workflows/ci.yml) chạy `flutter pub
+get`, format, analyze, test và build Web.
+
+## Cấu trúc chính
+
+```text
+lib/main.dart                 # UI và navigation Flutter
+lib/api_client.dart           # REST client, JWT và AI proxy call
+lib/config/ai_config.dart     # compile-time AI flags
+lib/services/                 # camera, GPS, scanner và LM Studio helpers
+test/widget_test.dart         # Flutter widget tests
+assets/figma/                 # assets từ thiết kế
+android/app/src/main/         # Android manifest và quyền thiết bị
+backend/server.js             # Node.js REST API
+backend/sql-store.js          # SQL Server persistence
+backend/migrate-json-to-sql.js # migration JSON sang SQL
+backend/sql-schema.sql        # schema bootstrap
+backend/data.json             # seed/fallback/migration source
+```
+
+## Bảo mật và vận hành
+
+- Không commit `backend/.env`, mật khẩu SQL, JWT secret hoặc SMTP app password.
+- Dùng JWT cho các endpoint theo tài khoản.
+- Không public SQL Server trực tiếp nếu không cần; giới hạn firewall hoặc dùng
+  VPN.
+- Hạn chế thời gian sống của tunnel ngrok và tắt tunnel sau khi demo.
+- Nếu credential từng bị lộ, phải rotate credential trước khi public lại.
+
+## Quy trình đóng góp
+
+1. Tạo branch từ branch hiện tại hoặc `main`.
+2. Chạy `flutter analyze`, `flutter test` và test backend liên quan.
+3. Cập nhật README khi thay đổi lệnh chạy, API hoặc cấu hình.
+4. Tạo Pull Request với mô tả thay đổi và kết quả kiểm thử.
+
+Xem thêm [CONTRIBUTING.md](CONTRIBUTING.md) và
+[backend/README.md](backend/README.md).

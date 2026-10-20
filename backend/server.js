@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const nodemailer = require('nodemailer');
+const { createSqlStoreFromEnv } = require('./sql-store');
 
 const PORT = Number(process.env.PORT || 3000);
 const DB_FILE = process.env.PCBUILD_DB_FILE || path.join(__dirname, 'data.json');
@@ -12,6 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'pcbuild-local-development-secret-c
 const JWT_EXPIRES_IN = Number(process.env.JWT_EXPIRES_IN || 3600);
 const API_ISSUER = 'pcbuild-local-api';
 const API_AUDIENCE = 'pcbuild-local-app';
+const sqlStore = createSqlStoreFromEnv();
 const money = (value) => Math.round(Number(value) || 0);
 const id = (prefix) => `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
 function base64Url(value) {
@@ -74,30 +76,57 @@ const seed = {
 function loadDb() {
   try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { return structuredClone(seed); }
 }
-let db = loadDb();
-for (const item of seed.products) {
-  if (!db.products.some((existing) => existing.id === item.id)) db.products.push(item);
-}
-db.notifications ??= [];
-db.supportRequests ??= [];
-db.market ??= {};
-db.passwordResetTokens ??= [];
-for (const area of db.areas) {
-  db.market[area.id] ??= {};
-  for (const item of db.products) {
-    db.market[area.id][item.id] ??= {
-      current: Math.round(item.price * ({ hcm: 1, hanoi: 1.024, danang: 1.011 }[area.id] || 1)),
-      previous: Math.round(item.price * ({ hcm: 0.982, hanoi: 1.006, danang: 0.997 }[area.id] || 0.982))
-    };
+function normalizeDb(value) {
+  const result = value || structuredClone(seed);
+  result.users ??= [];
+  result.areas ??= structuredClone(seed.areas);
+  result.products ??= [];
+  result.builds ??= [];
+  result.alerts ??= [];
+  result.conversations ??= [];
+  result.scans ??= [];
+  result.notifications ??= [];
+  result.supportRequests ??= [];
+  result.market ??= {};
+  result.passwordResetTokens ??= [];
+  for (const item of seed.products) {
+    if (!result.products.some((existing) => existing.id === item.id)) result.products.push(item);
   }
+  for (const area of result.areas) {
+    result.market[area.id] ??= {};
+    for (const item of result.products) {
+      result.market[area.id][item.id] ??= {
+        current: Math.round(item.price * ({ hcm: 1, hanoi: 1.024, danang: 1.011 }[area.id] || 1)),
+        previous: Math.round(item.price * ({ hcm: 0.982, hanoi: 1.006, danang: 0.997 }[area.id] || 0.982))
+      };
+    }
+  }
+  return result;
 }
-function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
+let db = normalizeDb(loadDb());
+const persistenceReady = sqlStore
+  ? sqlStore.initialize(normalizeDb(seed)).then((loaded) => {
+      db = normalizeDb(loaded);
+      console.log(`SQL Server persistence enabled: ${process.env.MSSQL_SERVER}:${process.env.MSSQL_PORT}/${process.env.MSSQL_DATABASE}`);
+    })
+  : Promise.resolve();
+let persistenceError;
+const saveDb = () => {
+  if (!sqlStore) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    return Promise.resolve();
+  }
+  return sqlStore.queueSave(db).catch((error) => {
+    persistenceError = error;
+    throw error;
+  });
+};
 function send(res, status, body) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type,authorization'
+    'access-control-allow-headers': 'content-type,authorization,ngrok-skip-browser-warning'
   });
   res.end(JSON.stringify(body));
 }
@@ -258,6 +287,8 @@ function compatibility(components) {
 }
 
 async function route(req, res) {
+  await persistenceReady;
+  if (persistenceError) throw persistenceError;
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const parts = url.pathname.split('/').filter(Boolean);
   const method = req.method;
@@ -607,6 +638,45 @@ if(response.ok) document.getElementById('submit').disabled=true;};
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/conversations') {
     const conversation = { id: id('conversation'), userId: user.id, messages: [] }; db.conversations.push(conversation); saveDb(); return send(res, 201, conversation);
+  }
+  if (method === 'POST' && parts.join('/') === 'api/v1/ai/chat') {
+    const lmStudioUrl = String(process.env.LM_STUDIO_URL || '').replace(/\/$/, '');
+    const model = String(process.env.LM_STUDIO_MODEL || 'qwen3-vl-8b-instruct');
+    if (!lmStudioUrl) {
+      return send(res, 503, { error: 'AI_PROVIDER_REQUIRED', message: 'Hãy cấu hình LM_STUDIO_URL cho máy chủ.' });
+    }
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    if (messages.length === 0) return send(res, 422, { error: 'INVALID_MESSAGES' });
+    try {
+      const headers = { 'content-type': 'application/json' };
+      if (process.env.LM_STUDIO_API_KEY) headers.authorization = `Bearer ${process.env.LM_STUDIO_API_KEY}`;
+      const response = await fetch(`${lmStudioUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: messages.slice(-12),
+          temperature: 0.4,
+          stream: false
+        })
+      });
+      const responseText = await response.text();
+      let responseBody;
+      try {
+        responseBody = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        responseBody = { error: { message: responseText || 'Phản hồi trống từ LM Studio.' } };
+      }
+      if (!response.ok) {
+        return send(res, 502, {
+          error: 'AI_PROVIDER_ERROR',
+          message: responseBody?.error?.message || `LM Studio trả về HTTP ${response.status}.`
+        });
+      }
+      return send(res, 200, responseBody);
+    } catch (error) {
+      return send(res, 502, { error: 'AI_PROVIDER_UNREACHABLE', message: error.message });
+    }
   }
   if (method === 'POST' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'conversations' && parts[4] === 'messages') {
     const conversation = db.conversations.find((item) => item.id === parts[3] && item.userId === user.id);
