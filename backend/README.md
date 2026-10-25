@@ -1,22 +1,47 @@
 # PCBUILD LOCAL API
 
-API Node.js native HTTP. Khi có đủ biến `MSSQL_*`, dữ liệu được lưu trong SQL
-Server; nếu không có cấu hình SQL, test vẫn dùng file `data.json`.
+API Node.js native HTTP. Runtime hiện tại truy cập SQL Server qua
+`sql-models.js` và cần các bảng quan hệ được tạo bởi `ensure_schema.js`.
+`data.json` không còn là fallback runtime.
 
-## Chạy và kiểm thử
+## Khởi động backend đầy đủ trên Windows
+
+Từ thư mục gốc, chạy [start-full-backend.bat](../start-full-backend.bat):
+
+```powershell
+.\start-full-backend.bat
+```
+
+Launcher kiểm tra file `.env`, dependencies và SQL Server từ xa, rồi mở Node API
+ở cổng `3000`. Model LM Studio cần được nạp sẵn qua Local Server theo cấu hình
+`LM_STUDIO_URL`; launcher không khởi động model tự huấn luyện.
+
+Để chạy thủ công:
 
 ```powershell
 cd backend
-$env:JWT_SECRET="thay-bang-chuoi-bi-mat-dai"
 npm start
 ```
 
-Chạy test:
+Xác nhận dịch vụ:
+
+```powershell
+Invoke-RestMethod http://localhost:3000/health
+```
+
+API docs ở `http://localhost:3000/docs`; OpenAPI JSON ở
+`http://localhost:3000/openapi.json`. Dừng API bằng `Ctrl+C` trong cửa sổ
+console. SQL Server runtime là máy chủ từ xa.
+
+## Kiểm thử
 
 ```powershell
 cd backend
 npm test
 ```
+
+`npm test` chạy smoke test `/health`, OpenAPI và xác thực chặn debug headers
+bằng cổng ngẫu nhiên; test không ghi vào SQL database.
 
 Swagger UI mở tại `http://localhost:3000/docs`. OpenAPI JSON ở
 `http://localhost:3000/openapi.json`.
@@ -53,9 +78,8 @@ Biến môi trường:
 | Biến | Mặc định | Ý nghĩa |
 |---|---:|---|
 | `PORT` | `3000` | Cổng HTTP |
-| `JWT_SECRET` | secret dev | Bắt buộc đổi khi public |
+| `JWT_SECRET` | — | Bắt buộc cấu hình một secret riêng trước khi chạy |
 | `JWT_EXPIRES_IN` | `3600` | Thời hạn JWT, tính bằng giây |
-| `PCBUILD_DB_FILE` | `backend/data.json` | File dữ liệu; dùng file tạm khi test |
 | `MSSQL_SERVER` | - | Hostname SQL Server |
 | `MSSQL_PORT` | - | Cổng SQL Server |
 | `MSSQL_DATABASE` | - | Tên database |
@@ -63,14 +87,69 @@ Biến môi trường:
 | `MSSQL_PASSWORD` | - | Mật khẩu, chỉ đặt trong `.env` |
 | `MSSQL_ENCRYPT` | `false` | Bật TLS khi máy chủ yêu cầu |
 | `MSSQL_TRUST_SERVER_CERTIFICATE` | `false` | Tin chứng chỉ tự ký |
+| `LM_STUDIO_URL` | - | OpenAI-compatible endpoint của LM Studio |
+| `LM_STUDIO_MODEL` | `qwen3-vl-8b-instruct` | Model LM Studio dùng cho chat/build |
+| `LM_STUDIO_VISION_MODEL` | `LM_STUDIO_MODEL` | Model LM Studio dùng cho nhận diện ảnh |
+| `LM_STUDIO_API_KEY` | - | Bearer token nếu Local Server bật xác thực |
+| `LM_STUDIO_TIMEOUT_MS` | `240000` | Timeout cho mỗi lượt gọi model |
+
+Chat, tư vấn, scan ảnh, OCR, rà SKU và AI Build fallback đều chỉ gọi LM Studio.
+Mỗi tác vụ nhận system prompt chuyên PCBUILD; dữ liệu động về giá, linh kiện,
+lịch sử và build chỉ lấy từ SQL. Adapter tự train không được nạp hoặc gọi khi
+chạy ứng dụng; giữ nguyên tập dữ liệu và checkpoint để train sau này.
+
+Luồng scan dùng LM Studio đọc ảnh/OCR, sau đó LM Studio xác nhận với danh sách
+ứng viên SQL rút gọn và ảnh gốc. Không gửi toàn bộ catalog 13.834 sản phẩm vào
+prompt vision. Chỉ lưu
+SKU khi ID cuối cùng khớp catalog SQL, confidence >= 0,9 và nội dung không mơ hồ.
+Ảnh quá lớn được báo lỗi 413/422 rõ ràng thay vì lỗi parse chung.
+
+Chat nhận catalog, build hiện tại và ví dụ hướng dẫn PC lưu trong
+`dbo.ai_pc_examples`; build được ghép từ SQL trước, LM Studio chỉ tạo phương án
+dự phòng khi SQL không có cấu hình hợp lệ. Với câu hỏi nguồn của build đã lưu, backend trả tóm
+tắt theo `powerAssessment` SQL để giữ đúng khoảng dư/thiếu; không lấy `marginW`
+thay cho margin hãng. Route scan chỉ nhận ID trong catalog khi confidence >=
+0,9 và nội dung không báo mơ hồ, kể cả khi LM Studio là provider cuối cùng.
+
+Model vision LM Studio đọc ảnh và xác nhận SKU với catalog. Pipeline detector
+YOLO và adapter train được giữ ngoại tuyến; app không nạp chúng.
+
+Ví dụ cấu hình hai model local trong `backend/.env`:
+
+```env
+LM_STUDIO_URL=http://127.0.0.1:3106/v1
+LM_STUDIO_MODEL=qwen3-vl-8b-instruct
+LM_STUDIO_VISION_MODEL=qwen3-vl-8b-instruct
+LM_STUDIO_TIMEOUT_MS=240000
+```
+
+LM Studio phải chạy Local Server và nạp model đúng tên tại `LM_STUDIO_URL`.
+Nếu LM Studio ngừng hoạt động, các tác vụ AI sẽ báo provider unavailable.
+LM Studio hỗ trợ cấu hình mức GPU offload qua CLI
+(`lms load --gpu off`) và qua thiết lập model.
+
+Catalog SQL có thêm `recommendedPsuW` và `recommendedPsuSource` cho GPU. Bộ
+kiểm tra PSU lấy mức lớn nhất giữa khuyến nghị của đúng model GPU, tải CPU/GPU
+trong catalog nhân 1,3 cộng 100W dự phòng, và mức sàn 450W. API trả riêng tải
+ước tính, mức đề nghị, PSU đang chọn, watt dư/thiếu và nguồn dữ liệu hãng.
 
 ### Kết nối SQL Server
 
 Tạo `backend/.env` từ `.env.example`, sau đó đặt mật khẩu cục bộ. Không commit
-file `.env`. API tự tạo bảng `dbo.pcbuild_app_state` khi khởi động và giữ
-toàn bộ dữ liệu domain trong JSON payload để không thay đổi hợp đồng API trong
-giai đoạn chuyển persistence. Script SQL tương ứng nằm tại
-`backend/sql-schema.sql`.
+file `.env`. Server hiện dùng các bảng quan hệ mà `ensure_schema.js` tạo. Chạy
+script từ thư mục gốc dự án để nó đọc đúng `backend/.env`:
+
+```powershell
+node backend/ensure_schema.js
+```
+
+Khi khởi động, API tự thêm `dbo.market_history` và các cột lưu ảnh/phân tích
+cho `dbo.scans`; không cần lưu dữ liệu nghiệp vụ trong file trên máy.
+
+`sql-store.js`, `sql-schema.sql` và `migrate-json-to-sql.js` vẫn thuộc nhánh
+persistence cũ dùng một bảng `dbo.pcbuild_app_state`; nhánh này không khớp với
+`sql-models.js` mà runtime hiện gọi. Không chạy migration đó trước khi thống
+nhất lại mô hình dữ liệu.
 
 Kiểm tra kết nối:
 
@@ -85,18 +164,22 @@ Khởi động API:
 npm start
 ```
 
-Nhập dữ liệu cũ từ `data.json` vào SQL Server theo chế độ merge:
-
-```powershell
-npm run migrate:json-to-sql
-```
-
-Lệnh này không xóa dữ liệu SQL Server và không ghi đè bản ghi đã có cùng
-`id`. Sau khi nhập, API chỉ đọc/ghi trạng thái ứng dụng trong SQL Server khi
-đủ cấu hình `MSSQL_*`; `data.json` chỉ còn là nguồn migration và fallback cho
-test không bật SQL.
+Các script migration hiện có thuộc hai mô hình dữ liệu khác nhau. Trước khi
+chạy script nào, hãy đối chiếu `migrate-json-to-sql.js` (bảng đơn
+`pcbuild_app_state`) với `migrate_to_tables.js` (các bảng quan hệ runtime) và
+sao lưu database. Chưa có một lệnh migration duy nhất được xác nhận cho runtime
+hiện tại.
 
 Không commit `JWT_SECRET` hoặc dữ liệu tài khoản thật.
+
+## Nguồn giá catalog
+
+`dbo.products.price` là giá catalog cơ sở. Khi khu vực chưa có bản ghi giá
+`dbo.market`, API trả `priceSource=catalog_estimate`; app gắn nhãn giá ước tính.
+Giá này có thể dùng cho tổng build tham khảo, nhưng không tạo dữ liệu biến động,
+lịch sử hay cảnh báo thị trường. Các chức năng theo dõi giá chỉ dùng bản ghi có
+giá dương trong `dbo.market`. Khi có giá thật, cập nhật `dbo.market` theo
+`productId` và `areaId`; schema không cần đổi.
 
 ## CRUD build để chấm bằng Swagger/Postman
 

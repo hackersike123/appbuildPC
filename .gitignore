@@ -22,6 +22,7 @@ migrate_working_dir/
 # VS Code which you may wish to be included in version control, so this line
 # is commented out by default.
 #.vscode/
+token.json
 
 # Flutter/Dart/Pub related
 **/doc/api/
@@ -29,6 +30,7 @@ migrate_working_dir/
 .dart_tool/
 backend/data.json
 backend/.env
+backend/login.json
 backend/node_modules/
 .flutter-plugins-dependencies
 .pub-cache/
@@ -49,3 +51,24 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Local AI fine-tuning environment
+.venv-ai-training/
+training/cache/
+
+# Local credentials and developer configuration
+.env
+.env.*
+!.env.example
+backend/.env.*
+!backend/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.vscode/
+.codex/
+.agents/
+dbhub.toml
+training/data/
+training/output/

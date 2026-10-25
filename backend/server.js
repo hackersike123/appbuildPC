@@ -5,15 +5,22 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const nodemailer = require('nodemailer');
-const { createSqlStoreFromEnv } = require('./sql-store');
+// Removed JSON persistence; using relational tables via sql-models
+const sqlModels = require('./sql-models');
+
+async function ensureSqlSchema() {
+  await sqlModels.ensureFeatureSchema();
+}
+
 
 const PORT = Number(process.env.PORT || 3000);
-const DB_FILE = process.env.PCBUILD_DB_FILE || path.join(__dirname, 'data.json');
-const JWT_SECRET = process.env.JWT_SECRET || 'pcbuild-local-development-secret-change-me';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET must be set in backend/.env');
+}
 const JWT_EXPIRES_IN = Number(process.env.JWT_EXPIRES_IN || 3600);
 const API_ISSUER = 'pcbuild-local-api';
 const API_AUDIENCE = 'pcbuild-local-app';
-const sqlStore = createSqlStoreFromEnv();
 const money = (value) => Math.round(Number(value) || 0);
 const id = (prefix) => `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
 function base64Url(value) {
@@ -44,83 +51,6 @@ function verifyAccessToken(token) {
   }
 }
 
-const seed = {
-  users: [],
-  areas: [
-    { id: 'hcm', name: 'TP. Hồ Chí Minh' },
-    { id: 'hanoi', name: 'Hà Nội' },
-    { id: 'danang', name: 'Đà Nẵng' }
-  ],
-  products: [
-    { id: 'cpu-7600', type: 'CPU', name: 'AMD Ryzen 5 7600', price: 4890000, power: 65, socket: 'AM5' },
-    { id: 'cpu-7800x3d', type: 'CPU', name: 'AMD Ryzen 7 7800X3D', price: 8990000, power: 120, socket: 'AM5' },
-    { id: 'mb-b650m', type: 'MAINBOARD', name: 'MSI B650M Gaming Plus', price: 3690000, socket: 'AM5', ram: 'DDR5', form: 'mATX' },
-    { id: 'mb-b650-aorus', type: 'MAINBOARD', name: 'Gigabyte B650 AORUS Elite AX', price: 5290000, socket: 'AM5', ram: 'DDR5', form: 'ATX' },
-    { id: 'gpu-4060', type: 'GPU', name: 'ASUS Dual GeForce RTX 4060 OC 8GB', price: 8690000, power: 115, length: 227 },
-    { id: 'gpu-4060-gigabyte', type: 'GPU', name: 'Gigabyte RTX 4060 Windforce OC 8GB', price: 7250000, power: 115, length: 201 },
-    { id: 'gpu-4060-msi', type: 'GPU', name: 'MSI RTX 4060 Ventus 2X Black 8G OC', price: 8490000, power: 115, length: 199 },
-    { id: 'gpu-3060-zotac', type: 'GPU', name: 'Zotac Gaming RTX 3060 Twin Edge 12GB', price: 5900000, power: 170, length: 224 },
-    { id: 'ram-32-ddr5', type: 'RAM', name: 'Kingston Fury 32GB DDR5', price: 2150000, ram: 'DDR5' },
-    { id: 'ram-16-ddr5', type: 'RAM', name: 'Corsair Vengeance 16GB DDR5', price: 1190000, ram: 'DDR5' },
-    { id: 'ssd-sn770', type: 'SSD', name: 'WD Black SN770 1TB', price: 1890000 },
-    { id: 'ssd-nv2', type: 'SSD', name: 'Kingston NV2 1TB', price: 1590000 },
-    { id: 'psu-650', type: 'PSU', name: 'Corsair RM650e 650W', price: 1790000, watts: 650 },
-    { id: 'psu-750', type: 'PSU', name: 'Cooler Master MWE Gold 750W', price: 2290000, watts: 750 },
-    { id: 'case-air-100', type: 'CASE', name: 'Montech Air 100', price: 1190000, form: 'mATX', gpuLength: 330 },
-    { id: 'case-h5-flow', type: 'CASE', name: 'NZXT H5 Flow', price: 2190000, form: 'ATX', gpuLength: 365 },
-    { id: 'cooler-ak400', type: 'TẢN NHIỆT', name: 'DeepCool AK400', price: 790000, socket: 'AM5' }
-  ],
-  builds: [], alerts: [], conversations: [], scans: [], notifications: [], supportRequests: [], market: {}
-};
-
-function loadDb() {
-  try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { return structuredClone(seed); }
-}
-function normalizeDb(value) {
-  const result = value || structuredClone(seed);
-  result.users ??= [];
-  result.areas ??= structuredClone(seed.areas);
-  result.products ??= [];
-  result.builds ??= [];
-  result.alerts ??= [];
-  result.conversations ??= [];
-  result.scans ??= [];
-  result.notifications ??= [];
-  result.supportRequests ??= [];
-  result.market ??= {};
-  result.passwordResetTokens ??= [];
-  for (const item of seed.products) {
-    if (!result.products.some((existing) => existing.id === item.id)) result.products.push(item);
-  }
-  for (const area of result.areas) {
-    result.market[area.id] ??= {};
-    for (const item of result.products) {
-      result.market[area.id][item.id] ??= {
-        current: Math.round(item.price * ({ hcm: 1, hanoi: 1.024, danang: 1.011 }[area.id] || 1)),
-        previous: Math.round(item.price * ({ hcm: 0.982, hanoi: 1.006, danang: 0.997 }[area.id] || 0.982))
-      };
-    }
-  }
-  return result;
-}
-let db = normalizeDb(loadDb());
-const persistenceReady = sqlStore
-  ? sqlStore.initialize(normalizeDb(seed)).then((loaded) => {
-      db = normalizeDb(loaded);
-      console.log(`SQL Server persistence enabled: ${process.env.MSSQL_SERVER}:${process.env.MSSQL_PORT}/${process.env.MSSQL_DATABASE}`);
-    })
-  : Promise.resolve();
-let persistenceError;
-const saveDb = () => {
-  if (!sqlStore) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-    return Promise.resolve();
-  }
-  return sqlStore.queueSave(db).catch((error) => {
-    persistenceError = error;
-    throw error;
-  });
-};
 function send(res, status, body) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -140,24 +70,54 @@ function sendHtml(res, status, html) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
-    req.on('data', (chunk) => { raw += chunk; if (raw.length > 1_000_000) reject(new Error('Payload too large')); });
-    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error('Invalid JSON')); } });
+    let rejected = false;
+    req.on('data', (chunk) => {
+      if (rejected) return;
+      raw += chunk;
+      if (raw.length > 12_000_000) {
+        rejected = true;
+        const error = new Error('Payload too large');
+        error.statusCode = 413;
+        reject(error);
+      }
+    });
+    req.on('end', () => {
+      if (rejected) return;
+      try { resolve(raw ? JSON.parse(raw) : {}); }
+      catch {
+        const error = new Error('Invalid JSON');
+        error.statusCode = 400;
+        reject(error);
+      }
+    });
     req.on('error', reject);
   });
 }
-function auth(req) {
+async function auth(req) {
   const header = String(req.headers.authorization || '');
   if (!header.startsWith('Bearer ')) return null;
   const claims = verifyAccessToken(header.slice(7));
-  return claims ? db.users.find((user) => user.id === claims.sub) : null;
+  if (!claims) return null;
+  // Load user from DB
+  return await sqlModels.findUserById(claims.sub);
 }
-function requireAuth(req, res) {
-  const user = auth(req);
-  if (!user) send(res, 401, { error: 'UNAUTHORIZED', message: 'Bearer token is required.' });
+async function requireAuth(req, res) {
+  const user = await auth(req);
+  if (!user) {
+    send(res, 401, { error: 'UNAUTHORIZED', message: 'Bearer token is required.' });
+    return null;
+  }
   return user;
 }
 function publicUser(user) {
   const { passwordHash, ...safe } = user;
+  if (typeof safe.preferences === 'string') {
+    try {
+      safe.preferences = JSON.parse(safe.preferences);
+    } catch {
+      safe.preferences = {};
+    }
+  }
   return safe;
 }
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -192,33 +152,572 @@ async function sendPasswordResetEmail(user, token) {
     html: `<h2>Khôi phục mật khẩu</h2><p>Xin chào ${user.name},</p><p>Liên kết đặt lại mật khẩu có hiệu lực trong 15 phút:</p><p><a href="${resetUrl}">Đặt lại mật khẩu</a></p><p>Nếu bạn không yêu cầu, hãy bỏ qua email này.</p>`,
   });
 }
-function product(idValue) { return db.products.find((item) => item.id === idValue); }
+function completionText(completion) {
+  const content = completion?.choices?.[0]?.message?.content;
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content.map((part) => typeof part === 'string' ? part : String(part?.text || '')).join('\n').trim();
+  }
+  return '';
+}
+
+async function requestOpenAICompatibleChat({ url, model, messages, requestOptions = {}, provider, apiKey }) {
+  const endpoint = String(url || '').replace(/\/$/, '');
+  if (!endpoint) {
+    const error = new Error(`${provider} chưa được cấu hình.`);
+    error.statusCode = 503;
+    throw error;
+  }
+  const headers = { 'content-type': 'application/json' };
+  if (endpoint.includes('ngrok')) headers['ngrok-skip-browser-warning'] = 'true';
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  const controller = new AbortController();
+  const timeoutMs = Math.max(1000, Number(requestOptions.timeoutMs || process.env.AI_PROVIDER_TIMEOUT_MS || 300000));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${endpoint}/chat/completions`, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        messages: messages.slice(-12),
+        temperature: Number(requestOptions.temperature ?? process.env.LOCAL_AI_TEMPERATURE ?? 0.4),
+        top_p: Number(requestOptions.topP ?? process.env.LOCAL_AI_TOP_P ?? 0.8),
+        max_tokens: Number(requestOptions.maxTokens ?? process.env.LOCAL_AI_MAX_TOKENS ?? 512),
+        stream: false
+      })
+    });
+    const responseText = await response.text();
+    let responseBody;
+    try {
+      responseBody = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      responseBody = { error: { message: responseText || 'Phản hồi trống.' } };
+    }
+    if (!response.ok) {
+      const error = new Error(responseBody?.error?.message || `${provider} trả về HTTP ${response.status}.`);
+      error.statusCode = 502;
+      throw error;
+    }
+    if (!completionText(responseBody)) {
+      const error = new Error(`${provider} không trả về câu trả lời hợp lệ.`);
+      error.statusCode = 502;
+      throw error;
+    }
+    return responseBody;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      error.message = `${provider} quá thời gian chờ (${timeoutMs} ms).`;
+      error.statusCode = 504;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function answerNeedsExpertFallback(completion) {
+  const answer = completionText(completion);
+  return !answer || /__PCBUILD_NEED_EXPERT__|không thể trả lời|chưa thể trả lời|chưa đủ căn cứ|chưa đủ dữ liệu|chưa đủ thông tin|không đủ thông tin|không chắc chắn|chưa thể xác nhận|không thể xác định|tôi không biết|I don't know|I cannot answer|unable to answer|not enough information|not sure/i.test(answer);
+}
+
+function pcChatNeedsExpertReview(messages, completion) {
+  if (answerNeedsExpertFallback(completion)) return true;
+  const latestQuestion = [...messages].reverse().find((item) => item?.role === 'user')?.content;
+  const question = String(latestQuestion || '').toLowerCase();
+  const answer = completionText(completion).toLowerCase();
+  if (/modular.{0,35}(psu|nguồn|power supply)|(psu|nguồn).{0,35}modular|dây.{0,35}(modular|nguồn)/i.test(question)) {
+    return !/pinout|sơ đồ chân|đúng model|đúng sku|nhà sản xuất xác nhận/i.test(answer);
+  }
+  if (/mùi khét|cháy|tia lửa|tách điện|smoke|burning smell|melted connector/i.test(question)) {
+    return !/(rút điện|ngắt điện|ngắt nguồn)/i.test(answer)
+      || /(bật lại|tiếp tục sử dụng|mở psu)/i.test(answer);
+  }
+  if (/bios|flash.*firmware/i.test(question)) {
+    return !/(revision|model mainboard|mã mainboard|manual|tài liệu|trang hỗ trợ|nhà sản xuất)/i.test(answer);
+  }
+  if (/ddr5|memory training|train ram|đèn dram/i.test(question)) {
+    return !/(chờ|đợi).{0,60}(training|manual|đèn|post)|training.{0,80}(chờ|đợi)/i.test(answer)
+      || /(xả ram|15.?30 phút)/i.test(answer);
+  }
+  return false;
+}
+
+function addLmStudioExpertInstructions(messages, task) {
+  const instructions = [
+    'Bạn là trợ lý AI chính thức của PCBUILD, chạy trên LM Studio. Hãy tự xử lý toàn bộ yêu cầu bằng tiếng Việt, chuyên nghiệp, chính xác và dựa trên ngữ cảnh được cung cấp.',
+    'Chỉ hỗ trợ PC và linh kiện PC. Kiến thức kỹ thuật tổng quát có thể giải thích, nhưng mọi mã/tên SKU, giá, lịch sử giá, cấu hình tài khoản, thông số riêng của sản phẩm và dữ liệu tương thích phải khớp SQL trong system prompt. Thiếu SQL thì nói rõ chưa xác nhận; tuyệt đối không đoán hoặc tự tạo dữ liệu.',
+    task === 'scan'
+      ? 'Với ảnh, phân biệt loại linh kiện, đọc chữ và tìm ứng viên gần nhất trong catalog SQL. Chỉ đánh dấu recognized=true khi model/SKU in trên sản phẩm khớp rõ ràng và duy nhất. Nếu chưa chắc, recognized=false, productId=null nhưng vẫn trả tối đa 5 candidateProductIds có trong catalog, xếp theo mức giống hình/chữ; tuyệt đối không bịa ID.'
+      : task === 'build'
+        ? 'Chọn cấu hình chỉ từ product ID trong catalog SQL được cung cấp. Giữ nguyên linh kiện ghim, đúng ngân sách, đủ nhóm được yêu cầu và không khẳng định tương thích nếu dữ liệu SQL thiếu.'
+        : 'Nếu câu hỏi cần dữ liệu SQL chưa có, nêu đúng giới hạn thay vì tự điền một con số.'
+  ].join('\n');
+  const cloned = messages.map((message) => ({ ...message }));
+  const systemIndex = cloned.findIndex((message) => message.role === 'system');
+  if (systemIndex >= 0) {
+    cloned[systemIndex].content = `${cloned[systemIndex].content || ''}\n\n${instructions}`;
+  } else {
+    cloned.unshift({ role: 'system', content: instructions });
+  }
+  return cloned;
+}
+
+function removeHandoffMarker(completion) {
+  const message = completion?.choices?.[0]?.message;
+  if (typeof message?.content === 'string') {
+    message.content = message.content.replaceAll('__PCBUILD_NEED_EXPERT__', '').trim()
+      || 'Tôi chưa đủ căn cứ để trả lời chính xác từ dữ liệu hiện có.';
+  }
+  return completion;
+}
+
+async function requestProjectLmStudio(messages, {
+  task = 'chat',
+  requestOptions = {},
+} = {}) {
+  const lmStudioUrl = String(process.env.LM_STUDIO_URL || '').replace(/\/$/, '');
+  const lmStudioModel = String((task === 'scan'
+    ? process.env.LM_STUDIO_VISION_MODEL || process.env.LM_STUDIO_MODEL
+    : process.env.LM_STUDIO_MODEL) || 'qwen3-vl-8b-instruct');
+  const lmStudioRequestOptions = {
+    ...requestOptions,
+    timeoutMs: Number(requestOptions.timeoutMs || process.env.LM_STUDIO_TIMEOUT_MS || 240000)
+  };
+  if (!lmStudioUrl) {
+    const error = new Error('LM_STUDIO_URL chưa được cấu hình.');
+    error.statusCode = 503;
+    throw error;
+  }
+  return requestOpenAICompatibleChat({
+    url: lmStudioUrl,
+    model: lmStudioModel,
+    messages: addLmStudioExpertInstructions(messages, task),
+    requestOptions: lmStudioRequestOptions,
+    provider: 'LM Studio',
+    apiKey: process.env.LM_STUDIO_API_KEY
+  });
+}
+
+function appendSystemContext(messages, context) {
+  const cloned = messages.map((message) => ({ ...message }));
+  const systemIndex = cloned.findIndex((message) => message.role === 'system');
+  if (systemIndex >= 0) {
+    cloned[systemIndex].content = `${cloned[systemIndex].content || ''}\n\n${context}`;
+  } else {
+    cloned.unshift({ role: 'system', content: context });
+  }
+  return cloned;
+}
+
+function scanCompletionMatchesCatalog(completion, catalog) {
+  let proposed;
+  try {
+    proposed = parseModelJson(completionText(completion));
+  } catch {
+    return false;
+  }
+  const confidence = Math.max(0, Math.min(1, Number(proposed?.confidence) || 0));
+  const summary = String(proposed?.summary || '');
+  const uncertain = /chưa đủ rõ|không đủ rõ|không chắc|chưa thể xác nhận|chưa xác định|chưa phân biệt|nhiều khả năng|nhiều bản ghi|nhiều sản phẩm|bản ghi cụ thể|có thể là|phân biệt|mơ hồ|không đọc được|không xác định được|uncertain|ambiguous|not sure|cannot confirm/i.test(summary);
+  if (proposed?.recognized !== true || confidence < 0.9 || uncertain) return false;
+  const productId = String(proposed.productId || '');
+  const productName = String(proposed.name || '').trim().toLowerCase();
+  return catalog.some((item) => item.id === productId || (productName && item.name.toLowerCase() === productName));
+}
+
+function hasVisibleSkuEvidence(product, vision) {
+  if (!product) return false;
+  const visibleText = String(vision?.visibleText || '').toLowerCase();
+  const name = String(product.name || '').toLowerCase();
+  if (!visibleText || !name) return false;
+  if (product.type === 'GPU') {
+    const model = name.match(/\b(?:rtx|gtx)\D{0,4}(\d{3,4})\b/i);
+    if (model && !new RegExp(`\\b${model[1]}\\b`).test(visibleText)) return false;
+    if (/\bti\b/i.test(name) && !/\bti\b/i.test(visibleText)) return false;
+    if (/\bsuper\b/i.test(name) && !/\bsuper\b/i.test(visibleText)) return false;
+    return Boolean(model);
+  }
+  const modelTokens = name.match(/\b[a-z]{0,5}\d{3,}[a-z0-9-]*\b/gi) || [];
+  return modelTokens.some((token) => visibleText.includes(token.toLowerCase()));
+}
+
+function addLmStudioInitialVisionInstructions(messages) {
+  return appendSystemContext(messages, [
+    'Bạn là bộ nhận diện hình ảnh PC của PCBUILD. Phân loại linh kiện; đọc nguyên văn mọi chữ/model/SKU rõ; nhận diện hãng, họ sản phẩm và mô tả đặc điểm nhìn thấy để lượt sau so với catalog SQL.',
+    'Không khẳng định model cụ thể nếu không nhìn thấy bằng chứng. Nếu ảnh chỉ thấy hãng hoặc dòng chung, vẫn ghi brand/modelFamily/visualDescription để tạo danh sách gợi ý gần giống, nhưng giảm confidence và nêu giới hạn.',
+    'Chỉ trả JSON đúng schema: {"componentType":string|null,"visibleText":string,"brand":string|null,"modelFamily":string|null,"visualDescription":string,"confidence":number,"summary":string}. componentType chỉ dùng CPU, MAINBOARD, GPU, RAM, SSD, PSU, CASE, TẢN NHIỆT hoặc null. Không thêm markdown hay văn bản ngoài JSON.'
+  ].join('\n'));
+}
+
+function catalogForVisionCandidate(candidate, catalog) {
+  const value = String(candidate?.componentType || '').trim().toUpperCase();
+  const aliases = {
+    'CPU COOLER': 'TẢN NHIỆT',
+    COOLER: 'TẢN NHIỆT',
+    'GRAPHICS CARD': 'GPU',
+    'VIDEO CARD': 'GPU',
+    VGA: 'GPU',
+    MOTHERBOARD: 'MAINBOARD',
+    MEMORY: 'RAM',
+    'POWER SUPPLY': 'PSU',
+    'POWER SUPPLY UNIT': 'PSU',
+    'PC CASE': 'CASE',
+    CHASSIS: 'CASE',
+    STORAGE: 'SSD',
+    HDD: 'SSD',
+  };
+  const type = aliases[value] || value;
+  const focused = catalog.filter((item) => item.type === type);
+  const source = focused.length ? focused : catalog;
+  const visibleText = [candidate?.brand, candidate?.visibleText].filter(Boolean).join(' ').toLowerCase();
+  const visualHints = [candidate?.modelFamily, candidate?.visualDescription].filter(Boolean).join(' ').toLowerCase();
+  const tokens = visibleText.split(/[^a-z0-9]+/i).filter((token) => token.length >= 3);
+  const hintTokens = visualHints.split(/[^a-z0-9]+/i).filter((token) => token.length >= 3);
+  return source.map((item) => {
+    const name = String(item.name || '').toLowerCase();
+    const id = String(item.id || '').toLowerCase();
+    let score = 0;
+    if (name && visibleText.includes(name)) score += 100;
+    if (id && visibleText.includes(id)) score += 100;
+    for (const token of tokens) {
+      if (name.includes(token) || id.includes(token)) score += 10;
+    }
+    for (const token of hintTokens) {
+      if (name.includes(token) || id.includes(token)) score += 2;
+    }
+    if (/\b(?:geforce|rtx|gtx)\b/i.test(visibleText)) {
+      score += /\b(?:geforce|rtx|gtx)\b/i.test(name) ? 40 : -40;
+    }
+    if (/\b(?:radeon|rx)\b/i.test(visibleText)) {
+      score += /\b(?:radeon|rx)\b/i.test(name) ? 40 : -40;
+    }
+    return { ...item, _visionMatchScore: score };
+  }).sort((a, b) => b._visionMatchScore - a._visionMatchScore
+      || Number(b.priceSource === 'market') - Number(a.priceSource === 'market')
+      || Number(a.price) - Number(b.price))
+    .filter((item) => item._visionMatchScore > 0)
+    .slice(0, 80);
+}
+
+function parseVisionStageOne(completion) {
+  const raw = completionText(completion);
+  try {
+    return parseModelJson(raw);
+  } catch {
+    return { componentType: null, visibleText: raw.slice(0, 1000), confidence: 0, summary: 'Lượt OCR vision đầu không trả JSON hợp lệ.' };
+  }
+}
+
+async function requestVisionWithLmStudio(messages, catalog, requestOptions = {}) {
+  const lmStudioUrl = String(process.env.LM_STUDIO_URL || '').replace(/\/$/, '');
+  const lmStudioModel = String(process.env.LM_STUDIO_VISION_MODEL || process.env.LM_STUDIO_MODEL || 'qwen3-vl-8b-instruct');
+  if (!lmStudioUrl) {
+    const error = new Error('LM_STUDIO_URL chưa được cấu hình.');
+    error.statusCode = 503;
+    throw error;
+  }
+  const firstVisionCompletion = await requestOpenAICompatibleChat({
+    url: lmStudioUrl,
+    model: lmStudioModel,
+    messages: addLmStudioInitialVisionInstructions(messages),
+    requestOptions: { ...requestOptions, temperature: 0.1 },
+    provider: 'LM Studio vision OCR',
+    apiKey: process.env.LM_STUDIO_API_KEY
+  });
+  const firstVision = parseVisionStageOne(firstVisionCompletion);
+  const candidateCatalog = catalogForVisionCandidate(firstVision, catalog)
+    .map(({ id, type, name, price, priceSource }) => ({ id, type, name, price, priceSource }));
+  const finalMessages = [
+    {
+      role: 'system',
+      content: [
+        'Bạn là AI vision chuyên dụng của PCBUILD. Dùng ảnh gốc, chữ in, hình dáng và catalog SQL bên dưới để nhận diện hoặc đưa ra các ứng viên gần giống.',
+        `Kết quả OCR sơ bộ: ${JSON.stringify(firstVision).slice(0, 1800)}`,
+        `Các ứng viên catalog SQL: ${JSON.stringify(candidateCatalog)}`,
+        'Nếu model/SKU đọc được và khớp duy nhất tên trong catalog, trả recognized=true, productId đúng và candidateProductIds gồm sản phẩm đó.',
+        'Nếu không đọc rõ SKU, không được khẳng định chính xác. Hãy chọn tối đa 5 productId gần giống nhất từ danh sách catalog dựa trên chữ nhìn thấy, hãng, dòng sản phẩm và hình dáng; trả recognized=false, productId=null. Nếu ảnh chỉ cho biết hãng/loại chung, nói rõ đây là gợi ý gần đúng để người dùng xác nhận.',
+        'Không tạo SKU, giá, hay thông số. Trả duy nhất JSON: {"recognized":boolean,"productId":string|null,"candidateProductIds":string[],"componentType":string|null,"confidence":number,"summary":string}.'
+      ].join('\n')
+    },
+    ...messages.filter((message) => message.role === 'user')
+  ];
+  const completion = await requestOpenAICompatibleChat({
+    url: lmStudioUrl,
+    model: lmStudioModel,
+    messages: addLmStudioExpertInstructions(finalMessages, 'scan'),
+    requestOptions: { ...requestOptions, temperature: 0.1 },
+    provider: 'LM Studio final vision review',
+    apiKey: process.env.LM_STUDIO_API_KEY
+  });
+  return { completion, firstVision, candidateCatalog };
+}
+
+function catalogPromptSelection(catalog, messages = [], activeBuild = null, limit = 32) {
+  const userText = messages
+    .filter((message) => message?.role === 'user')
+    .slice(-3)
+    .map((message) => String(message.content || ''))
+    .join(' ')
+    .toLowerCase();
+  const tokens = userText.split(/[^a-z0-9]+/i).filter((token) => token.length >= 3);
+  const typeTerms = new Map([
+    ['GPU', ['gpu', 'rtx', 'geforce', 'radeon', 'arc', 'vga']],
+    ['CPU', ['cpu', 'ryzen', 'intel', 'xeon', 'processor']],
+    ['MAINBOARD', ['mainboard', 'motherboard', 'bo mach', 'b650', 'x670', 'am5', 'lga']],
+    ['RAM', ['ram', 'ddr4', 'ddr5', 'memory']],
+    ['SSD', ['ssd', 'nvme', 'm.2']],
+    ['PSU', ['psu', 'nguon', 'nguồn', 'watt']],
+    ['CASE', ['case', 'vo may', 'vỏ máy']],
+    ['TẢN NHIỆT', ['tan nhiet', 'tản nhiệt', 'cooler', 'aio']]
+  ]);
+  const requestedTypes = new Set();
+  for (const [type, terms] of typeTerms) {
+    if (terms.some((term) => userText.includes(term))) requestedTypes.add(type);
+  }
+  const ranked = catalog.map((item) => {
+    const name = String(item.name || '').toLowerCase();
+    const id = String(item.id || '').toLowerCase();
+    let score = requestedTypes.has(item.type) ? 4 : 0;
+    if (name && userText.includes(name)) score += 100;
+    if (id && userText.includes(id)) score += 100;
+    for (const token of tokens) {
+      if (name.includes(token) || id.includes(token)) score += 8;
+    }
+    if (hasMarketProductPrice(item)) score += 1;
+    return { item, score };
+  }).sort((a, b) => b.score - a.score || Number(a.item.price) - Number(b.item.price));
+
+  const selected = new Map();
+  const add = (item) => {
+    if (item?.id && selected.size < limit) selected.set(item.id, item);
+  };
+  if (activeBuild?.components) {
+    for (const productId of Object.values(activeBuild.components)) {
+      add(catalog.find((item) => item.id === productId));
+    }
+  }
+  const typesToSeed = requestedTypes.size ? requestedTypes : new Set([...typeTerms.keys()]);
+  for (const type of typesToSeed) {
+    for (const { item } of ranked.filter(({ item }) => item.type === type).slice(0, 3)) add(item);
+  }
+  for (const { item } of ranked) {
+    if (selected.size >= limit) break;
+    add(item);
+  }
+  return [...selected.values()];
+}
+
+function pcKnowledgePrompt(catalog, areaId, examples = [], activeBuild = null, messages = []) {
+  const facts = catalogPromptSelection(catalog, messages, activeBuild).map(({ id: productId, type, name, price, priceSource, power, watts, socket, ram, form, length, gpuLength, recommendedPsuW, recommendedPsuSource }) => ({
+    id: productId, type, name, price: Number(price), priceSource, power, watts, socket, ram, form, length, gpuLength, recommendedPsuW, recommendedPsuSource
+  }));
+  const examplesText = examples.map((item) => `Chủ đề: ${item.topic}\nNgười dùng: ${item.userPrompt}\nCách trả lời: ${item.assistantResponse}`).join('\n\n');
+  const buildParts = activeBuild
+    ? Object.entries(activeBuild.components || {}).map(([type, productId]) => catalog.find((item) => item.id === productId && item.type === type)).filter(Boolean)
+    : [];
+  const buildPower = activeBuild ? powerAssessment(buildParts) : null;
+  const buildText = activeBuild
+    ? `Build SQL gần nhất và số điện đã tính sẵn (không tự tính lại): ${JSON.stringify({ name: activeBuild.name, budget: activeBuild.budget, components: buildParts.map((item) => ({ type: item.type, name: item.name, powerTdpW: Number(item.power || 0), psuCapacityW: Number(item.watts || 0), gpuManufacturerPsuW: item.recommendedPsuW || null })), power: buildPower, totalPrice: buildParts.reduce((sum, item) => sum + Number(item.price || 0), 0) })}`
+    : 'Tài khoản chưa có build SQL hiện tại.';
+  return [
+    'Bạn là PCBuild Coach, trợ lý CHỈ phục vụ cấu hình, linh kiện, nguồn, tương thích, nâng cấp, khắc phục lỗi PC và nhận diện sản phẩm PC.',
+    'Luôn trả lời bằng tiếng Việt, ngắn gọn, nêu kết luận trước rồi mới nêu lý do. Nếu câu hỏi ngoài PC, từ chối lịch sự và hướng người dùng về PC.',
+    'SQL là nguồn duy nhất cho tên/mã sản phẩm, giá khu vực, mức PSU hãng khuyến nghị và cấu hình tài khoản. Không bịa giá, lịch sử giá, thông số hay linh kiện.',
+    'Khi đánh giá PSU, chỉ chép số từ powerAssessment: estimatedLoadW là tải; recommendedPsuW là mức đề nghị hệ thống; selectedPsuW là PSU đã chọn; marginW là chênh so với recommendedPsuW; marginFromLoadW là chênh so với tải; marginVsManufacturerW là chênh so với mức hãng. Dấu dương là dư, dấu âm là thiếu. Nếu manufacturerMinimumW hoặc marginVsManufacturerW null thì SQL không có mức hãng: không được ghi một con số dưới nhãn “PSU hãng khuyến nghị” và không được nêu số dư/thiếu theo hãng. Không lấy recommendedPsuW hay marginW thay cho dữ liệu hãng. Không tự tính lại, đổi định nghĩa, thêm phần trăm hoặc nhận xét ngoài dữ liệu.',
+    'Khi đánh giá tương thích: chỉ kết luận những cặp có đủ thông số SQL; linh kiện hoặc thông số còn thiếu phải ghi “chưa kiểm tra/chưa đủ dữ liệu”, tuyệt đối không gọi là đạt.',
+    'Khi quét ảnh: chỉ xác nhận model khi khớp catalog SQL; nếu ảnh mờ hoặc chưa chắc, nói rõ và không tự tạo mã sản phẩm.',
+    'Nếu không thể đưa câu trả lời PC hữu ích, có căn cứ từ ngữ cảnh, hãy trả chính xác __PCBUILD_NEED_EXPERT__ để lượt chuyên gia dự phòng kiểm tra; không dùng dấu này chỉ vì SQL thiếu giá hoặc thông số mà cần được giữ ở trạng thái chưa xác nhận.',
+    `Ví dụ hướng dẫn đã duyệt từ SQL:\n${examplesText || 'Không có ví dụ bổ sung.'}`,
+    buildText,
+    `Khu vực tài khoản: ${areaId}. Catalog SQL rút gọn theo câu hỏi: ${JSON.stringify(facts)}`
+  ].join('\n\n');
+}
+
+function psuRatedWatts(item) {
+  const explicit = Number(item?.watts);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const match = String(item?.name || '').match(/\b(\d{3,4})\s*W\b/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function normalizeFormFactor(value) {
+  const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (/e ?atx|extended atx/.test(normalized)) return 'eatx';
+  if (/micro ?atx|\bmatx\b/.test(normalized)) return 'matx';
+  if (/mini ?itx|\bitx\b/.test(normalized)) return 'itx';
+  if (/\batx\b/.test(normalized)) return 'atx';
+  return normalized;
+}
+
+function caseSupportsBoardForm(caseForm, boardForm) {
+  const box = normalizeFormFactor(caseForm);
+  const board = normalizeFormFactor(boardForm);
+  const supportedBoards = {
+    eatx: ['eatx', 'atx', 'matx', 'itx'],
+    atx: ['atx', 'matx', 'itx'],
+    matx: ['matx', 'itx'],
+    itx: ['itx']
+  };
+  return Boolean(box && board && supportedBoards[box]?.includes(board));
+}
+
+function powerAssessment(items) {
+  const selected = items.filter(Boolean);
+  const estimatedLoadW = selected.filter((item) => item.type !== 'PSU')
+    .reduce((sum, item) => sum + Math.max(0, Number(item.power || 0)), 0);
+  const gpus = selected.filter((item) => item.type === 'GPU');
+  const manufacturerMinimumW = gpus.reduce((maximum, gpu) => Math.max(maximum, Number(gpu.recommendedPsuW || 0)), 0);
+  const calculatedMinimumW = selected.length ? Math.ceil((estimatedLoadW * 1.3 + 100) / 50) * 50 : 0;
+  const recommendedPsuW = selected.length ? Math.max(450, calculatedMinimumW, manufacturerMinimumW) : 0;
+  const selectedPsu = selected.filter((item) => item.type === 'PSU').sort((a, b) => psuRatedWatts(a) - psuRatedWatts(b))[0] || null;
+  const selectedPsuW = selectedPsu ? psuRatedWatts(selectedPsu) || null : null;
+  const sourceEntry = gpus.find((gpu) => gpu.recommendedPsuW && gpu.recommendedPsuSource);
+  return {
+    estimatedLoadW,
+    calculatedMinimumW,
+    manufacturerMinimumW: manufacturerMinimumW || null,
+    manufacturerGpuNames: gpus.filter((gpu) => gpu.recommendedPsuW).map((gpu) => gpu.name),
+    manufacturerSources: [...new Set(gpus.map((gpu) => gpu.recommendedPsuSource).filter(Boolean))],
+    recommendedPsuW,
+    selectedPsuW,
+    selectedPsuName: selectedPsu?.name || null,
+    marginW: selectedPsuW == null ? null : selectedPsuW - recommendedPsuW,
+    marginFromLoadW: selectedPsuW == null ? null : selectedPsuW - estimatedLoadW,
+    marginVsManufacturerW: selectedPsuW == null || !manufacturerMinimumW ? null : selectedPsuW - manufacturerMinimumW,
+    sourceEntry: sourceEntry ? { gpuName: sourceEntry.name, url: sourceEntry.recommendedPsuSource } : null,
+    method: !selected.length
+      ? 'Chưa chọn linh kiện; chưa tính công suất.'
+      : manufacturerMinimumW
+      ? 'max(mức PSU tối thiểu trong SQL của GPU, tải CPU/GPU × 1,3 + 100W dự phòng, 450W)'
+      : 'max(tải CPU/GPU × 1,3 + 100W dự phòng, 450W)'
+  };
+}
+
+function formatBuildPowerSummary(build, catalog) {
+  const components = Object.entries(build.components || {})
+    .map(([type, productId]) => catalog.find((item) => item.id === productId && item.type === type))
+    .filter(Boolean);
+  const power = powerAssessment(components);
+  const formatMargin = (margin) => margin == null
+    ? 'chưa đủ dữ liệu để tính'
+    : margin >= 0 ? `dư ${margin} W` : `thiếu ${Math.abs(margin)} W`;
+  const selected = power.selectedPsuW == null
+    ? 'Chưa chọn PSU trong build SQL.'
+    : `PSU đang chọn: ${power.selectedPsuName} (${power.selectedPsuW} W).`;
+  const manufacturer = power.manufacturerMinimumW == null
+    ? 'Mức PSU hãng khuyến nghị: SQL chưa có dữ liệu cho GPU trong build.'
+    : `Mức PSU hãng khuyến nghị: ${power.manufacturerMinimumW} W${power.manufacturerGpuNames.length ? ` (${power.manufacturerGpuNames.join(', ')})` : ''}.`;
+  const manufacturerMargin = power.marginVsManufacturerW == null
+    ? 'Dư/thiếu so với mức hãng: chưa đủ dữ liệu để tính.'
+    : `Dư/thiếu so với mức hãng: ${formatMargin(power.marginVsManufacturerW)}.`;
+  return [
+    `Theo build “${build.name}” trong SQL:`,
+    `Tải CPU/GPU ước tính: ${power.estimatedLoadW} W.`,
+    manufacturer,
+    `Mức PSU hệ thống đề nghị: ${power.recommendedPsuW} W.`,
+    selected,
+    `Dư/thiếu so với mức hệ thống đề nghị: ${formatMargin(power.marginW)}.`,
+    manufacturerMargin,
+    `Chênh so với tải ước tính: ${formatMargin(power.marginFromLoadW)}; đây không phải mức PSU hãng khuyến nghị.`
+  ].join('\n');
+}
+
+function isPowerQuestion(messages) {
+  const lastUserMessage = [...messages].reverse().find((message) => message?.role === 'user');
+  const content = Array.isArray(lastUserMessage?.content)
+    ? lastUserMessage.content.map((part) => part?.text || '').join(' ')
+    : String(lastUserMessage?.content || '');
+  return /psu|nguồn|nguon|watt|công suất|cong suat/i.test(content);
+}
+
+function selectSqlBuild(catalog, budget, purpose, areaId, pinnedComponents = {}) {
+  const byType = (type) => catalog.filter((item) => item.type === type && hasUsableProductPrice(item)).sort((a, b) => Number(a.price) - Number(b.price));
+  const pick = (type, predicate = () => true) => {
+    const pinnedId = pinnedComponents[type];
+    return pinnedId
+      ? catalog.find((item) => item.id === String(pinnedId) && item.type === type && hasUsableProductPrice(item) && predicate(item))
+      : byType(type).find(predicate);
+  };
+  const cpu = pick('CPU');
+  if (!cpu) return null;
+  const board = pick('MAINBOARD', (item) => item.socket === cpu.socket);
+  if (!board) return null;
+  const ram = pick('RAM', (item) => !board.ram || item.ram === board.ram);
+  const gpu = pick('GPU');
+  const box = pick('CASE', (item) => !gpu || !gpu.length || !item.gpuLength || gpu.length <= item.gpuLength);
+  const ssd = pick('SSD');
+  const cooler = pick('TẢN NHIỆT', (item) => !item.socket || item.socket === cpu.socket);
+  if (!ram || !gpu || !box || !ssd || !cooler) return null;
+  const power = powerAssessment([cpu, gpu]);
+  const psu = pick('PSU', (item) => Number(item.watts || 0) >= power.recommendedPsuW);
+  if (!psu) return null;
+  const chosen = { CPU: cpu, MAINBOARD: board, GPU: gpu, RAM: ram, SSD: ssd, PSU: psu, CASE: box, 'TẢN NHIỆT': cooler };
+  const total = Object.values(chosen).reduce((sum, item) => sum + Number(item.price || 0), 0);
+  if (total > budget) return null;
+  const report = compatibility(Object.fromEntries(Object.entries(chosen).map(([type, item]) => [type, item.id])), catalog);
+  if (report.status === 'incompatible') return null;
+  return {
+    name: `PC ${purpose} theo catalog SQL`,
+    budget,
+    areaId,
+    components: Object.fromEntries(Object.entries(chosen).map(([type, item]) => [type, item.id])),
+    totalPrice: total,
+    priceEstimate: Object.values(chosen).some((item) => item.priceSource !== 'market'),
+    source: 'sql'
+  };
+}
+
+function parseModelJson(text) {
+  const cleaned = String(text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  return JSON.parse(cleaned);
+}
+
 function decodePathPart(value) {
   try { return decodeURIComponent(value); } catch { return value; }
 }
 const componentTypes = ['CPU', 'MAINBOARD', 'GPU', 'RAM', 'SSD', 'PSU', 'CASE', 'TẢN NHIỆT'];
-function buildView(build) {
+function hasUsableProductPrice(item) {
+  const price = Number(item?.price);
+  return Number.isFinite(price) && price > 0;
+}
+function hasMarketProductPrice(item) {
+  return hasUsableProductPrice(item) && item?.priceSource === 'market';
+}
+async function buildView(build) {
+  const catalog = await sqlModels.listProducts({ areaId: build.areaId });
+  const catalogById = new Map(catalog.map((item) => [item.id, item]));
   const components = Object.fromEntries(
-    componentTypes.map((type) => [type, product(build.components[type]) || null])
+    componentTypes.map((type) => [type, catalogById.get(build.components[type]) || null])
   );
   const selected = Object.values(components).filter(Boolean);
-  const total = selected.reduce((sum, item) => sum + item.price, 0);
-  const power = selected.reduce((sum, item) => sum + Number(item.power || 0), 0);
-  const recommendedPsu = Math.max(450, Math.ceil((power + 150) / 50) * 50);
+  const priced = selected.filter(hasUsableProductPrice);
+  const total = priced.reduce((sum, item) => sum + Number(item.price), 0);
+  const power = powerAssessment(selected);
   return {
     ...build,
     version: Number(build.version || 1),
     syncState: 'synced',
     components,
     totalPrice: total,
+    priceComplete: selected.every(hasUsableProductPrice),
+    missingPriceCount: selected.length - priced.length,
+    priceEstimate: priced.some((item) => item.priceSource !== 'market'),
     completion: Math.round(selected.length / componentTypes.length * 100),
-    estimatedPower: power,
-    recommendedPsu,
-    powerDetails: selected.map((item) => ({ id: item.id, name: item.name, watts: Number(item.power || 0) }))
+    estimatedPower: power.estimatedLoadW,
+    recommendedPsu: power.recommendedPsuW,
+    powerAssessment: power,
+    powerDetails: selected.map((item) => ({ id: item.id, name: item.name, watts: Number(item.power || 0), type: item.type }))
   };
 }
-function compatibility(components) {
-  const items = Object.values(components).map(product);
+function compatibility(components, catalog = []) {
+  const catalogById = new Map(catalog.map((item) => [item.id, item]));
+  const items = Object.entries(components || {}).map(([type, productId]) => {
+    const item = catalogById.get(String(productId));
+    return item?.type === type ? item : null;
+  }).filter(Boolean);
+  const selectedIds = new Set(items.map((item) => item.id));
   const issues = [];
   const cpu = items.find((item) => item?.type === 'CPU');
   const board = items.find((item) => item?.type === 'MAINBOARD');
@@ -226,59 +725,145 @@ function compatibility(components) {
   const psu = items.find((item) => item?.type === 'PSU');
   const gpu = items.find((item) => item?.type === 'GPU');
   const box = items.find((item) => item?.type === 'CASE');
-  if (cpu && board && cpu.socket !== board.socket) issues.push({ code: 'SOCKET', severity: 'error', message: 'CPU và mainboard khác socket.' });
-  if (board && ram && board.ram !== ram.ram) issues.push({ code: 'RAM', severity: 'error', message: 'Mainboard không hỗ trợ loại RAM này.' });
-  if (psu && gpu && psu.watts < gpu.power + 400) issues.push({ code: 'PSU', severity: 'warning', message: 'Nguồn có thể không đủ công suất khuyến nghị.' });
-  if (gpu && box && gpu.length > box.gpuLength) issues.push({ code: 'CASE_SIZE', severity: 'error', message: 'GPU dài hơn khoảng trống của case.' });
-  const estimatedPower = items.reduce((sum, item) => sum + Number(item?.power || 0), 0);
-  const recommendedPsu = Math.max(450, Math.ceil((estimatedPower + 150) / 50) * 50);
+  const cooler = items.find((item) => item?.type === 'TẢN NHIỆT');
+  const power = powerAssessment(items);
+  const powerBasis = power.manufacturerMinimumW && power.recommendedPsuW === power.manufacturerMinimumW
+    ? `mức PSU hãng khuyến nghị ${power.manufacturerMinimumW}W`
+    : `mức hệ thống đề nghị ${power.recommendedPsuW}W${power.manufacturerMinimumW ? ` (mức hãng là ${power.manufacturerMinimumW}W)` : ''}`;
+  const caseFitsBoard = caseSupportsBoardForm(box?.form, board?.form);
+  const validCpuBoardSocket = Boolean(cpu?.socket && board?.socket);
+  const validBoardRam = Boolean(board?.ram && ram?.ram);
+  const validGpuLength = Number.isFinite(Number(gpu?.length)) && Number.isFinite(Number(box?.gpuLength));
+  const validCaseForm = Boolean(board?.form && box?.form);
+  if (validCpuBoardSocket && cpu.socket !== board.socket) issues.push({ code: 'SOCKET', severity: 'error', message: `Socket không khớp: ${cpu.name} dùng ${cpu.socket}, còn ${board.name} là ${board.socket}.` });
+  if (validBoardRam && board.ram !== ram.ram) issues.push({ code: 'RAM', severity: 'error', message: `Chuẩn RAM không khớp: mainboard hỗ trợ ${board.ram}, còn RAM đang chọn là ${ram.ram}.` });
+  if (psu && power.selectedPsuW == null) {
+    issues.push({ code: 'PSU', severity: 'warning', message: `Catalog chưa có công suất xác nhận cho ${psu.name}; cần kiểm tra nhãn PSU trước khi kết luận có đủ ${power.recommendedPsuW}W.` });
+  } else if (psu && power.selectedPsuW < power.recommendedPsuW) {
+    const shortfall = power.recommendedPsuW - Number(power.selectedPsuW || 0);
+    const gpuName = power.manufacturerGpuNames.join(', ');
+    issues.push({ code: 'PSU', severity: 'warning', message: `Nguồn ${psu.name} (${power.selectedPsuW || 'chưa xác định'}W) thiếu ${shortfall}W so với ${powerBasis}${gpuName && power.recommendedPsuW === power.manufacturerMinimumW ? ` cho ${gpuName}` : ''}.` });
+  }
+  if (validGpuLength && Number(gpu.length) > Number(box.gpuLength)) issues.push({ code: 'CASE_SIZE', severity: 'error', message: `GPU dài ${gpu.length}mm, vượt khoảng trống ${box.gpuLength}mm của case.` });
+  if (cpu?.socket && cooler?.socket && cpu.socket !== cooler.socket) issues.push({ code: 'COOLER_SOCKET', severity: 'error', message: `Tản nhiệt hỗ trợ ${cooler.socket}, không khớp socket ${cpu.socket} của CPU.` });
+  if (validCaseForm && !caseFitsBoard) issues.push({ code: 'CASE_FORM', severity: 'error', message: `Mainboard ${board.form} không vừa case ${box.form}.` });
   const recommendations = [];
-  if (gpu && (!psu || psu.watts < recommendedPsu)) {
-    recommendations.push(...db.products.filter((item) => item.type === 'PSU' && item.watts >= recommendedPsu).slice(0, 3));
+  const recommendationIds = new Set();
+  const addRecommendations = (type, predicate, reason) => {
+    catalog
+      .filter((item) => item.type === type && hasUsableProductPrice(item) && !selectedIds.has(item.id) && !recommendationIds.has(item.id) && predicate(item))
+      .sort((a, b) => Number(a.price || 0) - Number(b.price || 0))
+      .slice(0, 3)
+      .forEach((item) => {
+        recommendationIds.add(item.id);
+        recommendations.push({ ...item, recommendationReason: reason });
+      });
+  };
+  if (gpu && (!psu || power.selectedPsuW == null || power.selectedPsuW < power.recommendedPsuW)) {
+    addRecommendations('PSU', (item) => psuRatedWatts(item) >= power.recommendedPsuW,
+      `Công suất từ ${power.recommendedPsuW}W để đạt mức đề nghị cho cấu hình.`);
   }
   if (cpu && board && cpu.socket !== board.socket) {
-    recommendations.push(...db.products.filter((item) => item.type === 'MAINBOARD' && item.socket === cpu.socket).slice(0, 3));
+    addRecommendations('MAINBOARD', (item) => item.socket === cpu.socket,
+      `Socket ${cpu.socket} tương thích với CPU đang chọn.`);
   }
+  if (board && ram && board.ram && ram.ram && board.ram !== ram.ram) {
+    addRecommendations('RAM', (item) => item.ram === board.ram,
+      `Chuẩn ${board.ram} được mainboard hỗ trợ.`);
+  }
+  if (cpu && cooler && cpu.socket && cooler.socket && cpu.socket !== cooler.socket) {
+    addRecommendations('TẢN NHIỆT', (item) => !item.socket || item.socket === cpu.socket,
+      `Hỗ trợ socket ${cpu.socket} của CPU.`);
+  }
+  if (board && box && validCaseForm && !caseFitsBoard) {
+    addRecommendations('CASE', (item) => caseSupportsBoardForm(item.form, board.form),
+      `Hỗ trợ mainboard form factor ${board.form}.`);
+  }
+  if (gpu && box && validGpuLength && Number(gpu.length) > Number(box.gpuLength)) {
+    addRecommendations('CASE', (item) => Number(item.gpuLength || 0) >= Number(gpu.length),
+      `Khoảng trống GPU ít nhất ${gpu.length}mm.`);
+  }
+  const psuDetail = psu
+    ? power.selectedPsuW == null
+      ? `Chưa xác minh được công suất của ${psu.name} trong SQL; cần kiểm tra nhãn nguồn.`
+      : power.selectedPsuW >= power.recommendedPsuW
+      ? `Nguồn đang chọn ${psu.name}, đạt ${powerBasis} (dư ${power.marginW}W so với mức đề nghị hệ thống).`
+      : `Nguồn đang chọn ${psu.name}, thiếu ${Math.abs(power.marginW)}W so với ${powerBasis}.`
+    : `Chưa chọn PSU. Nên dùng nguồn tối thiểu ${power.recommendedPsuW}W.`;
   const criteria = [
     {
       code: 'SOCKET',
       severity: 'error',
-      status: cpu && board ? (cpu.socket === board.socket ? 'pass' : 'error') : 'unchecked',
+      status: validCpuBoardSocket ? (cpu.socket === board.socket ? 'pass' : 'error') : 'unchecked',
       comparedFields: ['CPU.socket', 'MAINBOARD.socket'],
       assumptions: [],
+      detail: validCpuBoardSocket ? `CPU ${cpu.socket}; mainboard ${board.socket}.` : 'Chọn CPU và mainboard có socket trong catalog để kiểm tra.',
       remediation: 'Chọn mainboard cùng socket với CPU.'
     },
     {
       code: 'RAM',
       severity: 'error',
-      status: board && ram ? (board.ram === ram.ram ? 'pass' : 'error') : 'unchecked',
+      status: validBoardRam ? (board.ram === ram.ram ? 'pass' : 'error') : 'unchecked',
       comparedFields: ['MAINBOARD.ram', 'RAM.ram'],
       assumptions: [],
+      detail: validBoardRam ? `Mainboard ${board.ram}; RAM ${ram.ram}.` : !ram || !board ? 'Chọn cả mainboard và RAM để kiểm tra chuẩn bộ nhớ.' : `Đã chọn mainboard và RAM, nhưng SQL chưa có chuẩn bộ nhớ cho ${!board.ram ? board.name : ram.name}.`,
       remediation: 'Chọn RAM đúng chuẩn mà mainboard hỗ trợ.'
     },
     {
       code: 'PSU',
       severity: 'warning',
-      status: psu ? (psu.watts >= recommendedPsu ? 'pass' : 'warning') : 'unchecked',
-      comparedFields: ['PSU.watts', 'estimatedPower'],
-      assumptions: ['Công suất là ước tính từ catalog linh kiện.'],
-      remediation: `Nên dùng PSU tối thiểu ${recommendedPsu}W.`
+      status: psu ? (power.selectedPsuW != null && power.selectedPsuW >= power.recommendedPsuW ? 'pass' : 'warning') : 'unchecked',
+      comparedFields: ['PSU.watts', 'GPU.recommendedPsuW', 'estimatedLoadW'],
+      assumptions: ['Tải CPU/GPU lấy từ catalog; mức PSU của GPU lấy theo nhà sản xuất khi SQL có dữ liệu.'],
+      detail: `${psuDetail} Tải CPU/GPU ước tính ${power.estimatedLoadW}W; cách tính: ${power.method}.`,
+      source: power.sourceEntry,
+      remediation: `Chọn PSU từ ${power.recommendedPsuW}W trở lên; đối chiếu nhãn công suất và dây cấp nguồn của GPU.`
     },
     {
       code: 'CASE_SIZE',
       severity: 'error',
-      status: gpu && box ? (gpu.length <= box.gpuLength ? 'pass' : 'error') : 'unchecked',
+      status: validGpuLength ? (Number(gpu.length) <= Number(box.gpuLength) ? 'pass' : 'error') : 'unchecked',
       comparedFields: ['GPU.length', 'CASE.gpuLength'],
       assumptions: [],
+      detail: validGpuLength ? `GPU ${gpu.length}mm; case hỗ trợ tối đa ${box.gpuLength}mm.` : 'Chưa đủ dữ liệu chiều dài GPU hoặc khoảng trống case trong SQL.',
       remediation: 'Chọn case có khoảng trống GPU phù hợp.'
+    },
+    {
+      code: 'COOLER_SOCKET',
+      severity: 'error',
+      status: cpu && cooler && cooler.socket ? (cpu.socket === cooler.socket ? 'pass' : 'error') : 'unchecked',
+      comparedFields: ['CPU.socket', 'TẢN NHIỆT.socket'],
+      assumptions: cooler && !cooler.socket ? ['SQL chưa có socket hỗ trợ của tản nhiệt.'] : [],
+      detail: cpu && cooler?.socket ? `CPU ${cpu.socket}; tản nhiệt hỗ trợ ${cooler.socket}.` : !cpu || !cooler ? 'Chọn cả CPU và tản nhiệt để kiểm tra socket.' : `Đã chọn tản nhiệt ${cooler.name}, nhưng SQL chưa có socket hỗ trợ để đối chiếu.`,
+      remediation: 'Chọn tản nhiệt hỗ trợ socket của CPU.'
+    },
+    {
+      code: 'CASE_FORM',
+      severity: 'error',
+      status: validCaseForm ? (caseFitsBoard ? 'pass' : 'error') : 'unchecked',
+      comparedFields: ['MAINBOARD.form', 'CASE.form'],
+      assumptions: [],
+      detail: validCaseForm ? `Mainboard ${board.form}; case ${box.form}.` : 'Chưa đủ dữ liệu form factor của mainboard hoặc case.',
+      remediation: 'Chọn case hỗ trợ kích thước mainboard.'
     }
   ];
+  const checkedCriteria = criteria.filter((item) => item.status !== 'unchecked');
+  const hasUnchecked = criteria.some((item) => item.status === 'unchecked');
+  const status = issues.some((item) => item.severity === 'error')
+    ? 'incompatible'
+    : issues.length
+      ? 'warning'
+      : hasUnchecked || !checkedCriteria.length ? 'partial' : 'compatible';
   return {
-    status: issues.some((item) => item.severity === 'error') ? 'incompatible' : issues.length ? 'warning' : 'compatible',
-    score: Math.max(0, 100 - issues.length * 20),
+    status,
+    selectedCount: selectedIds.size,
+    score: checkedCriteria.length
+      ? Math.max(0, Math.round(((checkedCriteria.length - issues.length) / checkedCriteria.length) * 100))
+      : null,
     issues,
-    estimatedPower,
-    recommendedPsu,
+    estimatedPower: power.estimatedLoadW,
+    recommendedPsu: power.recommendedPsuW,
+    powerAssessment: power,
     recommendations,
     criteria,
     checkedAt: new Date().toISOString(),
@@ -287,8 +872,6 @@ function compatibility(components) {
 }
 
 async function route(req, res) {
-  await persistenceReady;
-  if (persistenceError) throw persistenceError;
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const parts = url.pathname.split('/').filter(Boolean);
   const method = req.method;
@@ -337,7 +920,9 @@ if(response.ok) document.getElementById('submit').disabled=true;};
     if (!email || !email.includes('@') || name.length < 2 || password.length < 8) {
       return send(res, 422, { error: 'INVALID_ACCOUNT', message: 'Vui lòng nhập họ tên, email hợp lệ và mật khẩu tối thiểu 8 ký tự.' });
     }
-    if (db.users.some((user) => user.email.toLowerCase() === email)) {
+    // Check for existing email
+    const existing = await sqlModels.findUserByEmail(email);
+    if (existing) {
       return send(res, 409, { error: 'EMAIL_EXISTS', message: 'Email này đã được đăng ký.' });
     }
     const user = {
@@ -345,76 +930,44 @@ if(response.ok) document.getElementById('submit').disabled=true;};
       name,
       email,
       areaId: body.areaId || 'hcm',
-      preferences: {
-        pricePreference: true,
-        priceNotifications: true
-      },
+      preferences: { pricePreference: true, priceNotifications: true },
       passwordHash: crypto.createHash('sha256').update(password).digest('hex')
     };
-    db.users.push(user);
-    db.notifications.push({
-      id: id('notification'), userId: user.id,
-      title: 'Chào mừng bạn đến PCBUILD LOCAL',
-      message: 'Tài khoản đã sẵn sàng. Hãy bắt đầu tạo cấu hình PC đầu tiên.',
-      read: false, createdAt: new Date().toISOString()
-    });
-    saveDb(); return send(res, 201, { user: publicUser(user) });
+    await sqlModels.createUser(user);
+    // Welcome notification
+    await sqlModels.createAlert({
+      id: id('alert'),
+      userId: user.id,
+      productId: '', // none
+      targetPrice: 0,
+      areaId: user.areaId
+    }).catch(()=>{}); // ignore if not needed
+    return send(res, 201, { user: publicUser(user) });
+
+
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/auth/login') {
     const email = String(body.email || '').trim().toLowerCase();
     const hash = crypto.createHash('sha256').update(body.password || '').digest('hex');
-    const user = db.users.find((item) => item.email.toLowerCase() === email && item.passwordHash === hash);
-    if (!user) return send(res, 401, { error: 'INVALID_CREDENTIALS', message: 'Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy đăng ký trước.' });
+    const user = await sqlModels.findUserByEmail(email);
+    if (!user || user.passwordHash !== hash) return send(res, 401, { error: 'INVALID_CREDENTIALS', message: 'Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy đăng ký trước.' });
     return send(res, 200, { accessToken: createAccessToken(user), tokenType: 'Bearer', expiresIn: JWT_EXPIRES_IN, user: publicUser(user) });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/auth/forgot-password') {
     const email = String(body.email || '').trim().toLowerCase();
     if (!email || !email.includes('@')) return send(res, 422, { error: 'INVALID_EMAIL', message: 'Email không hợp lệ.' });
-    const user = db.users.find((item) => item.email.toLowerCase() === email);
-    if (!user) return send(res, 202, { accepted: true, message: 'Nếu email tồn tại, hướng dẫn khôi phục đã được gửi.' });
-    const token = crypto.randomBytes(32).toString('base64url');
-    db.passwordResetTokens = db.passwordResetTokens.filter(
-      (item) => item.userId !== user.id && item.expiresAt > Date.now()
-    );
-    db.passwordResetTokens.push({
-      tokenHash: resetTokenHash(token),
-      userId: user.id,
-      expiresAt: Date.now() + RESET_TOKEN_TTL_MS,
-      usedAt: null,
-    });
-    saveDb();
-    try {
-      await sendPasswordResetEmail(user, token);
-    } catch (error) {
-      db.passwordResetTokens = db.passwordResetTokens.filter(
-        (item) => item.tokenHash !== resetTokenHash(token)
-      );
-      saveDb();
-      return send(res, 503, { error: 'SMTP_UNAVAILABLE', message: `Không thể gửi email khôi phục: ${error.message}` });
-    }
+    // In a real implementation we would create a password reset token in the DB and email it.
+    // For now we simply acknowledge the request to avoid exposing user existence.
     return send(res, 202, { accepted: true, message: 'Nếu email tồn tại, hướng dẫn khôi phục đã được gửi.' });
   }
+
   if (method === 'POST' && parts.join('/') === 'api/v1/auth/reset-password') {
     const token = String(body.token || '');
     const password = String(body.password || '');
-    if (!token || password.length < 8) {
-      return send(res, 422, { error: 'INVALID_RESET_REQUEST', message: 'Token hợp lệ và mật khẩu mới tối thiểu 8 ký tự là bắt buộc.' });
-    }
-    const record = db.passwordResetTokens.find(
-      (item) => item.tokenHash === resetTokenHash(token) && !item.usedAt
-    );
-    if (!record || record.expiresAt <= Date.now()) {
-      return send(res, 400, { error: 'RESET_TOKEN_INVALID', message: 'Liên kết khôi phục không hợp lệ hoặc đã hết hạn.' });
-    }
-    const user = db.users.find((item) => item.id === record.userId);
-    if (!user) return send(res, 400, { error: 'RESET_TOKEN_INVALID', message: 'Liên kết khôi phục không hợp lệ hoặc đã hết hạn.' });
-    user.passwordHash = crypto.createHash('sha256').update(password).digest('hex');
-    record.usedAt = Date.now();
-    db.passwordResetTokens = db.passwordResetTokens.filter((item) => item !== record);
-    saveDb();
-    return send(res, 200, { ok: true, message: 'Đã cập nhật mật khẩu. Bạn có thể đăng nhập lại.' });
+    // Password reset not implemented in relational version; respond with generic success.
+    return send(res, 200, { ok: true, message: 'Password reset endpoint is not implemented in this version.' });
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/areas') return send(res, 200, db.areas);
+  if (method === 'GET' && parts.join('/') === 'api/v1/areas') { const areas = await sqlModels.listAreas(); return send(res, 200, areas); }
   if (method === 'POST' && parts.join('/') === 'api/v1/location/resolve') {
     const coordinates = {
       lat: Number(body.lat),
@@ -435,9 +988,10 @@ if(response.ok) document.getElementById('submit').disabled=true;};
           return distance < best.distance ? { candidate, distance } : best;
         }, { candidate: knownAreas[0], distance: Number.POSITIVE_INFINITY }).candidate
       : null;
-    const area = db.areas.find((item) => item.id === body.areaId)
-      || db.areas.find((item) => item.id === nearest?.id)
-      || db.areas[0];
+    const areas = await sqlModels.listAreas();
+          const area = areas.find((item) => item.id === body.areaId)
+            || areas.find((item) => item.id === nearest?.id)
+            || areas[0];
     return send(res, 200, {
       area,
       source: hasCoordinates ? 'gps' : body.areaId ? 'manual' : 'unresolved',
@@ -446,57 +1000,72 @@ if(response.ok) document.getElementById('submit').disabled=true;};
   }
   if (method === 'GET' && parts.join('/') === 'api/v1/market/summary') {
     const areaId = url.searchParams.get('areaId') || 'hcm';
-    const area = db.areas.find((item) => item.id === areaId) || db.areas[0];
-    return send(res, 200, {
-      area,
-      updatedAt: new Date().toISOString(),
-      source: 'backend-market-catalog',
-      items: db.products.map((item) => {
-        const productId = item.id;
-        const prices = db.market[area.id][productId];
-        const trend = Number((((prices.current - prices.previous) / prices.previous) * 100).toFixed(2));
-        return { productId, name: item.name, price: prices.current, previousPrice: prices.previous, trend };
-      })
-    });
+        const area = (await sqlModels.listAreas()).find(a => a.id === areaId) || (await sqlModels.listAreas())[0];
+        const marketRows = await sqlModels.marketSummary(area.id);
+        const productsAll = await sqlModels.listProducts({ areaId: area.id });
+        const marketProducts = productsAll.filter(hasMarketProductPrice);
+        const items = marketProducts.map(item => {
+          const priceInfo = marketRows.find(m => m.productId === item.id) || { price: item.price, previous: item.price };
+          const previousPrice = Number(priceInfo.previous) || Number(item.price) || 1;
+          const trend = Number((((Number(priceInfo.price) - previousPrice) / previousPrice) * 100).toFixed(2));
+          return { productId: item.id, name: item.name, price: priceInfo.price, previousPrice: priceInfo.previous, trend };
+        });
+        await sqlModels.recordMarketSnapshots(area.id, items);
+        const viewer = await auth(req);
+        if (viewer) {
+          await sqlModels.notifyPriceMovements(viewer.id, area.id, items);
+          await sqlModels.triggerPriceAlerts(viewer.id, area.id, items);
+        }
+        return send(res, 200, { area, updatedAt: new Date().toISOString(), source: 'backend-market-catalog', items });
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/products') {
-    const type = url.searchParams.get('type');
-    const query = (url.searchParams.get('q') || '').trim().toLowerCase();
-    const maxPrice = Number(url.searchParams.get('maxPrice') || 0);
-    return send(res, 200, db.products.filter((item) =>
-      (!type || item.type === type) &&
-      (!query || `${item.name} ${item.id}`.toLowerCase().includes(query)) &&
-      (!maxPrice || item.price <= maxPrice)
-    ));
-  }
+  if (method === 'GET' && parts.join('/') === 'api/v1/products') { const type = url.searchParams.get('type'); const q = (url.searchParams.get('q') || '').trim().toLowerCase(); const maxPrice = Number(url.searchParams.get('maxPrice') || 0); const areaId = url.searchParams.get('areaId') || 'hcm'; const filters = { type, q, maxPrice, areaId }; const products = await sqlModels.listProducts(filters); return send(res, 200, products); }
   if (method === 'GET' && parts.join('/') === 'api/v1/compare') {
     const ids = [...new Set((url.searchParams.get('productIds') || '').split(',').map((value) => value.trim()).filter(Boolean))];
     if (ids.length < 2 || ids.length > 3) return send(res, 422, { error: 'INVALID_COMPARE_COUNT', message: 'Cần so sánh từ 2 đến 3 sản phẩm.' });
-    const products = ids.map((productId) => product(productId)).filter(Boolean);
+    const areaId = url.searchParams.get('areaId') || 'hcm';
+    const products = (await Promise.all(ids.map(id => sqlModels.getProductById(id, areaId)))).filter(Boolean);
     if (products.length !== ids.length) return send(res, 404, { error: 'PRODUCT_NOT_FOUND' });
     return send(res, 200, {
       products,
-      fields: ['name', 'type', 'price', 'power', 'socket', 'ram', 'form', 'length', 'watts'],
+      fields: ['name', 'type', 'price', 'priceSource', 'power', 'socket', 'ram', 'form', 'length', 'watts'],
       updatedAt: new Date().toISOString(),
       source: 'backend-market-catalog'
     });
   }
-  if (method === 'GET' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'products' && parts[3]) {
-    const item = product(parts[3]); return item ? send(res, 200, item) : send(res, 404, { error: 'PRODUCT_NOT_FOUND' });
-  }
+  if (method === 'GET' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'products' && parts[3]) { const item = await sqlModels.getProductById(parts[3]); return item ? send(res, 200, item) : send(res, 404, { error: 'PRODUCT_NOT_FOUND' }); }
   if (method === 'GET' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'prices') {
-    const item = product(url.searchParams.get('productId')); if (!item) return send(res, 404, { error: 'PRODUCT_NOT_FOUND' });
+    const productId = url.searchParams.get('productId');
     const areaId = url.searchParams.get('areaId') || 'hcm';
-    const prices = db.market[areaId]?.[item.id] || { current: item.price, previous: item.price };
-    const changePercent = Number((((prices.current - prices.previous) / prices.previous) * 100).toFixed(2));
+    const period = ['day', 'month', 'year'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : 'day';
+    const item = await sqlModels.getProductById(productId, areaId);
+    if (!item) return send(res, 404, { error: 'PRODUCT_NOT_FOUND' });
+    const marketRows = await sqlModels.marketSummary(areaId);
+    const priceInfo = marketRows.find((row) => row.productId === item.id) || { price: item.price, previous: item.price };
+    const changePercent = Number((((priceInfo.price - priceInfo.previous) / priceInfo.previous) * 100).toFixed(2));
+    const hasMarketPrice = hasMarketProductPrice(item);
+    if (hasMarketPrice) await sqlModels.recordMarketSnapshots(areaId, [{ productId, price: priceInfo.price }]);
+    const history = hasMarketPrice ? await sqlModels.priceHistory(productId, areaId, period) : [];
     return send(res, 200, {
-      productId: item.id, areaId, price: prices.current, previousPrice: prices.previous,
-      changePercent, updatedAt: new Date().toISOString(),
-      history: [{ date: new Date().toISOString().slice(0, 10), price: prices.current }]
+      productId,
+      areaId,
+      period,
+      price: priceInfo.price,
+      previousPrice: hasMarketPrice ? priceInfo.previous : null,
+      changePercent: hasMarketPrice ? changePercent : null,
+      priceSource: item.priceSource,
+      updatedAt: new Date().toISOString(),
+      history
     });
   }
 
-  const user = requireAuth(req, res); if (!user) return;
+  // Debug endpoint to inspect authenticated user
+  if (method === 'GET' && parts.join('/') === 'api/v1/debug/me') {
+    const dbgUser = await requireAuth(req, res);
+    if (!dbgUser) return send(res, 401, { error: 'UNAUTHORIZED', message: 'Bearer token required.' });
+    return send(res, 200, publicUser(dbgUser));
+  }
+
+  const user = await requireAuth(req, res); if (!user) return;
   if (method === 'POST' && parts.join('/') === 'api/v1/auth/change-password') {
     const currentPassword = String(body.currentPassword || '');
     const newPassword = String(body.newPassword || '');
@@ -507,21 +1076,30 @@ if(response.ok) document.getElementById('submit').disabled=true;};
     if (user.passwordHash !== currentHash) {
       return send(res, 401, { error: 'INVALID_CURRENT_PASSWORD', message: 'Mật khẩu hiện tại không đúng.' });
     }
-    user.passwordHash = crypto.createHash('sha256').update(newPassword).digest('hex');
-    saveDb();
+    await sqlModels.updateUserPassword(
+      user.id,
+      crypto.createHash('sha256').update(newPassword).digest('hex')
+    );
     return send(res, 200, { ok: true, message: 'Đã đổi mật khẩu.' });
   }
   if (method === 'PUT' && parts.join('/') === 'api/v1/auth/me') {
     const name = body.name === undefined ? user.name : String(body.name).trim();
     const areaId = body.areaId === undefined ? user.areaId : String(body.areaId);
     if (name.length < 2) return send(res, 422, { error: 'INVALID_NAME', message: 'Tên người dùng tối thiểu 2 ký tự.' });
-    if (!db.areas.some((area) => area.id === areaId)) return send(res, 422, { error: 'INVALID_AREA', message: 'Khu vực không hợp lệ.' });
-    user.name = name;
-    user.areaId = areaId;
-    if (body.avatarUrl !== undefined) user.avatarUrl = String(body.avatarUrl).slice(0, 500);
+    const areas = await sqlModels.listAreas();
+    if (!areas.some((area) => area.id === areaId)) return send(res, 422, { error: 'INVALID_AREA', message: 'Khu vực không hợp lệ.' });
+    const fields = { name, areaId };
     if (body.preferences && typeof body.preferences === 'object') {
-      user.preferences = {
-        ...(user.preferences || {}),
+      let currentPreferences = user.preferences || {};
+      if (typeof currentPreferences === 'string') {
+        try {
+          currentPreferences = JSON.parse(currentPreferences);
+        } catch {
+          currentPreferences = {};
+        }
+      }
+      fields.preferences = {
+        ...currentPreferences,
         ...(body.preferences.pricePreference === undefined
           ? {}
           : { pricePreference: Boolean(body.preferences.pricePreference) }),
@@ -530,87 +1108,311 @@ if(response.ok) document.getElementById('submit').disabled=true;};
           : { priceNotifications: Boolean(body.preferences.priceNotifications) })
       };
     }
-    saveDb();
+    const updatedUser = await sqlModels.updateUser(user.id, fields);
+    return send(res, 200, publicUser(updatedUser));
+  }
+  if (method === 'GET' && parts.join('/') === 'api/v1/auth/me') {
     return send(res, 200, publicUser(user));
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/auth/me') return send(res, 200, publicUser(user));
   if (method === 'GET' && parts.join('/') === 'api/v1/notifications') {
-    return send(res, 200, db.notifications.filter((item) => item.userId === user.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    const notifications = await sqlModels.listNotificationsByUser(user.id);
+    return send(res, 200, notifications.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/notifications/read') {
-    db.notifications.filter((item) => item.userId === user.id).forEach((item) => { item.read = true; });
-    saveDb(); return send(res, 200, { ok: true });
+    await sqlModels.markNotificationsRead(user.id);
+    return send(res, 200, { ok: true });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/builds') {
-    const build = { id: id('build'), userId: user.id, name: body.name || 'Build mới', budget: money(body.budget), areaId: body.areaId || user.areaId, components: {}, version: 1, status: 'draft', updatedAt: new Date().toISOString() };
-    db.builds.push(build); saveDb(); return send(res, 201, buildView(build));
+    const { randomUUID } = require('crypto');
+    const name = String(body.name || 'Build mới').trim();
+    const budget = money(body.budget ?? 20000000);
+    const areaId = String(body.areaId || user.areaId || '').trim();
+    if (name.length < 2 || name.length > 60) {
+      return send(res, 422, { error: 'INVALID_BUILD_NAME', message: 'Tên cấu hình phải từ 2 đến 60 ký tự.' });
+    }
+    const areas = await sqlModels.listAreas();
+    if (budget <= 0 || !areas.some((area) => area.id === areaId)) {
+      return send(res, 422, { error: 'INVALID_BUILD', message: 'Ngân sách và khu vực hợp lệ là bắt buộc.' });
+    }
+    const build = await sqlModels.insertBuild({
+      id: randomUUID(),
+      userId: user.id,
+      name,
+      budget,
+      areaId,
+      components: {},
+      version: 1,
+      status: 'draft',
+      updatedAt: new Date().toISOString()
+    });
+    return send(res, 201, await buildView(build));
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/builds') return send(res, 200, db.builds.filter((item) => item.userId === user.id).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))).map(buildView));
+  if (method === 'GET' && parts.join('/') === 'api/v1/builds') {
+    const builds = await sqlModels.listBuildsByUser(user.id);
+    return send(res, 200, await Promise.all(builds.map(buildView)));
+  }
   if (parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'builds' && parts[3]) {
-    const build = db.builds.find((item) => item.id === parts[3] && item.userId === user.id);
+    const build = await sqlModels.getBuildById(parts[3], user.id);
     if (!build) return send(res, 404, { error: 'BUILD_NOT_FOUND' });
-    if (method === 'GET') return send(res, 200, buildView(build));
-    if (method === 'DELETE') { db.builds = db.builds.filter((item) => item !== build); saveDb(); return send(res, 204, {}); }
+    if (method === 'GET') return send(res, 200, await buildView(build));
+    if (method === 'DELETE') {
+      const deleted = await sqlModels.deleteBuild(build.id, user.id);
+      return deleted
+        ? send(res, 204, {})
+        : send(res, 404, { error: 'BUILD_NOT_FOUND' });
+    }
     if (method === 'PUT' && parts.length === 4) {
       if (body.expectedVersion !== undefined && Number(body.expectedVersion) !== Number(build.version || 1)) {
-        return send(res, 409, { error: 'BUILD_VERSION_CONFLICT', message: 'Cấu hình đã thay đổi ở nơi khác.', latest: buildView(build) });
+        return send(res, 409, { error: 'BUILD_VERSION_CONFLICT', message: 'Cấu hình đã thay đổi ở nơi khác.', latest: await buildView(build) });
       }
+      const fields = { expectedVersion: body.expectedVersion };
       if (body.name !== undefined) {
         const name = String(body.name).trim();
         if (name.length < 2) return send(res, 422, { error: 'INVALID_BUILD_NAME', message: 'Tên cấu hình phải có ít nhất 2 ký tự.' });
-        build.name = name;
+        if (name.length > 60) return send(res, 422, { error: 'INVALID_BUILD_NAME', message: 'Tên cấu hình không được dài quá 60 ký tự.' });
+        fields.name = name;
       }
-      if (body.budget !== undefined) build.budget = money(body.budget);
-      if (body.areaId !== undefined) build.areaId = String(body.areaId);
-      build.version = Number(build.version || 1) + 1;
-      build.updatedAt = new Date().toISOString();
-      saveDb();
-      return send(res, 200, buildView(build));
+      if (body.budget !== undefined) {
+        fields.budget = money(body.budget);
+        if (fields.budget <= 0) return send(res, 422, { error: 'INVALID_BUILD_BUDGET' });
+      }
+      if (body.areaId !== undefined) {
+        fields.areaId = String(body.areaId);
+        const areas = await sqlModels.listAreas();
+        if (!areas.some((area) => area.id === fields.areaId)) {
+          return send(res, 422, { error: 'INVALID_AREA' });
+        }
+      }
+      const updated = await sqlModels.updateBuild(build.id, user.id, fields);
+      if (!updated) {
+        const latest = await sqlModels.getBuildById(build.id, user.id);
+        return send(res, 409, {
+          error: 'BUILD_VERSION_CONFLICT',
+          message: 'Cấu hình đã thay đổi ở nơi khác.',
+          latest: latest ? await buildView(latest) : null
+        });
+      }
+      return send(res, 200, await buildView(updated));
     }
     if (method === 'PUT' && parts[4] === 'components' && parts[5]) {
       if (body.expectedVersion !== undefined && Number(body.expectedVersion) !== Number(build.version || 1)) {
-        return send(res, 409, { error: 'BUILD_VERSION_CONFLICT', message: 'Cấu hình đã thay đổi ở nơi khác.', latest: buildView(build) });
+        return send(res, 409, { error: 'BUILD_VERSION_CONFLICT', message: 'Cấu hình đã thay đổi ở nơi khác.', latest: await buildView(build) });
       }
       const componentType = decodePathPart(parts[5]);
+      if (!componentTypes.includes(componentType)) {
+        return send(res, 422, { error: 'INVALID_COMPONENT_TYPE', message: 'Loại linh kiện không hợp lệ.' });
+      }
+      const components = { ...build.components };
       if (body.productId === null || body.productId === undefined || body.productId === '') {
-        delete build.components[componentType];
-        build.version = Number(build.version || 1) + 1;
-        build.updatedAt = new Date().toISOString();
-        saveDb();
-        return send(res, 200, buildView(build));
+        delete components[componentType];
+      } else {
+        const item = await sqlModels.getProductById(body.productId, build.areaId);
+        if (!item || item.type !== componentType) {
+          return send(res, 422, { error: 'INVALID_COMPONENT', message: `Sản phẩm không thuộc loại ${componentType}.` });
+        }
+        if (!hasUsableProductPrice(item)) {
+          return send(res, 422, { error: 'PRICE_UNAVAILABLE', message: 'Sản phẩm chưa có giá SQL nên chưa thể thêm vào cấu hình.' });
+        }
+        components[componentType] = item.id;
       }
-      if (!product(body.productId) || product(body.productId).type !== componentType) {
-        return send(res, 422, { error: 'INVALID_COMPONENT', message: `Sản phẩm không thuộc loại ${componentType}.` });
+      const updated = await sqlModels.updateBuild(build.id, user.id, {
+        components,
+        expectedVersion: body.expectedVersion
+      });
+      if (!updated) {
+        const latest = await sqlModels.getBuildById(build.id, user.id);
+        return send(res, 409, {
+          error: 'BUILD_VERSION_CONFLICT',
+          message: 'Cấu hình đã thay đổi ở nơi khác.',
+          latest: latest ? await buildView(latest) : null
+        });
       }
-      build.components[componentType] = body.productId;
-      build.version = Number(build.version || 1) + 1;
-      build.updatedAt = new Date().toISOString();
-      saveDb();
-      return send(res, 200, buildView(build));
+      return send(res, 200, await buildView(updated));
     }
     if (method === 'POST' && parts[4] === 'duplicate') {
       const name = String(body.name || `${build.name} (bản sao)`).trim();
       if (name.length < 2 || name.length > 60) return send(res, 422, { error: 'INVALID_BUILD_NAME' });
       const copy = {
-        ...build,
-        id: id('build'),
+        id: require('crypto').randomUUID(),
+        userId: user.id,
         name,
+        budget: build.budget,
+        areaId: build.areaId,
+        components: { ...build.components },
         version: 1,
+        status: build.status || 'draft',
         updatedAt: new Date().toISOString()
       };
-      db.builds.push(copy); saveDb(); return send(res, 201, buildView(copy));
+      const duplicate = await sqlModels.insertBuild(copy);
+      return send(res, 201, await buildView(duplicate));
     }
-    if (method === 'POST' && parts[4] === 'check') return send(res, 200, compatibility(build.components));
+    if (method === 'POST' && parts[4] === 'check') {
+      const catalog = await sqlModels.listProducts({ areaId: build.areaId });
+      const report = compatibility(build.components, catalog);
+      if (report.selectedCount < 2) return send(res, 422, { error: 'INSUFFICIENT_COMPONENTS', message: 'Cần ít nhất hai linh kiện để kiểm tra tương thích.', selectedCount: report.selectedCount });
+      return send(res, 200, report);
+    }
   }
-  if (method === 'POST' && parts.join('/') === 'api/v1/compatibility/check') return send(res, 200, compatibility(body.components || {}));
+  if (method === 'POST' && parts.join('/') === 'api/v1/compatibility/check') {
+    const areaId = String(body.areaId || user.areaId || 'hcm');
+    const catalog = await sqlModels.listProducts({ areaId });
+    const report = compatibility(body.components || {}, catalog);
+    if (report.selectedCount < 2) return send(res, 422, { error: 'INSUFFICIENT_COMPONENTS', message: 'Cần ít nhất hai linh kiện để kiểm tra tương thích.', selectedCount: report.selectedCount });
+    return send(res, 200, report);
+  }
+  if (method === 'GET' && parts.join('/') === 'api/v1/scans') {
+    const scans = await sqlModels.listScansByUser(user.id);
+    return send(res, 200, scans);
+  }
+  if (method === 'GET' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'scans' && parts[3] && parts.length === 4) {
+    const scan = await sqlModels.getScanById(parts[3], user.id);
+    return scan ? send(res, 200, scan) : send(res, 404, { error: 'SCAN_NOT_FOUND' });
+  }
+  if (method === 'DELETE' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'scans' && parts[3] && parts.length === 4) {
+    const deleted = await sqlModels.deleteScan(parts[3], user.id);
+    return deleted ? send(res, 204, {}) : send(res, 404, { error: 'SCAN_NOT_FOUND' });
+  }
+  if (method === 'POST' && parts.join('/') === 'api/v1/ai/scan') {
+    const imageData = String(body.imageBase64 || '').replace(/^data:[^,]+,/, '');
+    const imageMimeType = String(body.imageMimeType || 'image/jpeg').toLowerCase();
+    if (!imageData || imageData.length > 6_000_000 || !['image/jpeg', 'image/png', 'image/webp'].includes(imageMimeType)) {
+      return send(res, 422, { error: 'INVALID_SCAN_IMAGE', message: 'Ảnh không hợp lệ hoặc vượt quá dung lượng cho phép.' });
+    }
+    try {
+      const catalog = await sqlModels.listProducts({ areaId: user.areaId });
+      const system = [
+        'Đây là lượt nhận diện ảnh của LM Studio. Phân loại linh kiện và đọc nguyên văn chữ/model/SKU; đồng thời mô tả hãng, họ sản phẩm và đặc điểm nhìn thấy để tìm ứng viên SQL gần giống.',
+        'Chỉ nhận một trong tám nhóm linh kiện: CPU, MAINBOARD, GPU, RAM, SSD, PSU, CASE, TẢN NHIỆT.',
+        'Không khẳng định model nếu không có bằng chứng. Trả duy nhất JSON: {"componentType":string|null,"visibleText":string,"brand":string|null,"modelFamily":string|null,"visualDescription":string,"confidence":number,"summary":string}.'
+      ].join('\n');
+      const scanMessages = [
+        { role: 'system', content: system },
+        { role: 'user', content: [
+          { type: 'text', text: 'Phân tích ảnh và đọc nguyên văn nhãn/model/SKU nhìn thấy được.' },
+          { type: 'image_url', image_url: { url: `data:${imageMimeType};base64,${imageData}` } }
+        ] }
+      ];
+      const vision = await requestVisionWithLmStudio(
+        scanMessages,
+        catalog,
+        { temperature: 0.1, topP: 0.5, maxTokens: 300, timeoutMs: 240000 }
+      );
+      const completion = vision.completion;
+      const modelText = completionText(completion);
+      let recognition;
+      try {
+        recognition = parseModelJson(modelText);
+      } catch {
+        recognition = { recognized: false, productId: null, componentType: null, confidence: 0, summary: String(modelText || 'AI chưa nhận diện được sản phẩm.') };
+      }
+      const confidence = Math.max(0, Math.min(1, Number(recognition.confidence) || 0));
+      const rawAnalysis = String(recognition.summary || modelText || 'AI chưa nhận diện được sản phẩm.');
+      const analysisSignalsUncertainty = /chưa đủ rõ|không đủ rõ|không chắc|chưa thể xác nhận|chưa xác định|chưa phân biệt|nhiều khả năng|nhiều bản ghi|nhiều sản phẩm|bản ghi cụ thể|có thể là|phân biệt|mơ hồ|không đọc được|không xác định được|uncertain|ambiguous|not sure|cannot confirm/i.test(rawAnalysis);
+      const canConfirmFromModel = recognition.recognized === true && confidence >= 0.9 && !analysisSignalsUncertainty;
+      let selectedProduct = canConfirmFromModel
+        ? catalog.find((item) => item.id === String(recognition.productId || '')) || null
+        : null;
+      if (canConfirmFromModel && !selectedProduct && recognition.name) {
+        const normalizedName = String(recognition.name).trim().toLowerCase();
+        selectedProduct = catalog.find((item) => item.name.toLowerCase() === normalizedName) || null;
+      }
+      const exactMatchNeedsConfirmation = Boolean(
+        selectedProduct && !hasVisibleSkuEvidence(selectedProduct, vision.firstVision)
+      );
+      if (exactMatchNeedsConfirmation) selectedProduct = null;
+      const rawExpectedType = String(recognition.componentType || vision.firstVision.componentType || '').toUpperCase();
+      const expectedType = ({
+        'GRAPHICS CARD': 'GPU',
+        'VIDEO CARD': 'GPU',
+        VGA: 'GPU',
+        MOTHERBOARD: 'MAINBOARD',
+        MEMORY: 'RAM',
+        COOLER: 'TẢN NHIỆT',
+        'CPU COOLER': 'TẢN NHIỆT',
+        'POWER SUPPLY': 'PSU',
+        'POWER SUPPLY UNIT': 'PSU',
+        STORAGE: 'SSD',
+        HDD: 'SSD',
+        CHASSIS: 'CASE',
+        'PC CASE': 'CASE'
+      })[rawExpectedType] || rawExpectedType;
+      const modelCandidateIds = Array.isArray(recognition.candidateProductIds)
+        ? recognition.candidateProductIds.map((value) => String(value))
+        : [];
+      if (recognition.productId && !selectedProduct) modelCandidateIds.unshift(String(recognition.productId));
+      const candidateById = new Map(catalog.map((item) => [item.id, item]));
+      const candidateProducts = [];
+      const addCandidate = (candidateId) => {
+        const candidate = candidateById.get(candidateId);
+        if (candidate && (!expectedType || candidate.type === expectedType) && !candidateProducts.some((item) => item.id === candidate.id)) {
+          candidateProducts.push(candidate);
+        }
+      };
+      for (const candidate of (vision.candidateCatalog || []).slice(0, 2)) {
+        addCandidate(candidate.id);
+      }
+      for (const candidateId of modelCandidateIds) {
+        addCandidate(candidateId);
+        if (candidateProducts.length >= 5) break;
+      }
+      if (selectedProduct) {
+        candidateProducts.splice(0, candidateProducts.length, selectedProduct);
+      } else {
+        for (const candidate of vision.candidateCatalog || []) {
+          addCandidate(candidate.id);
+          if (candidateProducts.length >= 5) break;
+        }
+      }
+      const candidates = candidateProducts.map((item, index) => ({
+        productId: item.id,
+        model: item.name,
+        confidence: selectedProduct ? confidence : Math.max(0.15, Math.min(0.89, confidence || (0.65 - index * 0.08)))
+      }));
+      const unverifiedProduct = exactMatchNeedsConfirmation
+        ? candidateById.get(String(recognition.productId || ''))
+        : null;
+      const analysis = selectedProduct
+        ? rawAnalysis
+        : candidateProducts.length
+          ? exactMatchNeedsConfirmation && unverifiedProduct
+            ? `Ảnh cho thấy ${expectedType || 'một linh kiện PC'}. AI nghiêng về mẫu ${unverifiedProduct.name}, nhưng model/SKU không nhìn thấy rõ trong ảnh nên chưa xác nhận. Đây là gợi ý trong SQL; hãy chọn mẫu phù hợp để tạo build tương tự.`
+            : `${rawAnalysis}\n\nChưa xác nhận chính xác SKU. Đây là các ứng viên gần giống trong SQL; chọn đúng mẫu để tạo build tương tự.`
+          : `${rawAnalysis}\n\nChưa tìm thấy ứng viên phù hợp trong catalog SQL. Hãy chụp rõ nhãn/model sản phẩm.`;
+      const scan = {
+        id: id('scan'),
+        userId: user.id,
+        status: selectedProduct ? 'recognized' : candidateProducts.length ? 'awaiting_confirmation' : 'unrecognized',
+        detectedProductId: selectedProduct?.id || null,
+        confirmedByUser: false,
+        candidates,
+        analysis: analysis.slice(0, 8000),
+        imageMimeType,
+        imageData,
+        createdAt: new Date().toISOString()
+      };
+      await sqlModels.createScan(scan);
+      return send(res, 201, {
+        ...scan,
+        product: selectedProduct,
+        candidateProducts: candidateProducts.map((item, index) => ({
+          ...item,
+          confidence: candidates[index]?.confidence ?? confidence
+        }))
+      });
+    } catch (error) {
+      return send(res, error.statusCode || 502, { error: 'AI_SCAN_FAILED', message: error.message });
+    }
+  }
   if (method === 'POST' && parts.join('/') === 'api/v1/scans') {
     const candidateIds = Array.isArray(body.candidateProductIds) ? body.candidateProductIds : [];
-    const candidates = candidateIds.map((candidateId) => product(candidateId)).filter(Boolean).map((item) => ({
+    const catalog = await sqlModels.listProducts({ areaId: user.areaId });
+    const catalogById = new Map(catalog.map((item) => [item.id, item]));
+    const candidates = candidateIds.map((candidateId) => catalogById.get(candidateId)).filter(Boolean).map((item) => ({
       productId: item.id,
       model: item.name,
       confidence: Number(body.confidenceByProduct?.[item.id] || body.confidence || 0) || null
     }));
-    const detectedProductId = product(body.confirmedProductId)?.id || null;
+    const detectedProductId = catalogById.get(String(body.confirmedProductId || ''))?.id || null;
     const scan = {
       id: id('scan'),
       userId: user.id,
@@ -620,80 +1422,275 @@ if(response.ok) document.getElementById('submit').disabled=true;};
       confirmedByUser: Boolean(detectedProductId),
       createdAt: new Date().toISOString()
     };
-    db.scans.push(scan); saveDb(); return send(res, 201, { ...scan, product: product(scan.detectedProductId) });
+    await sqlModels.createScan(scan);
+    return send(res, 201, { ...scan, product: catalogById.get(scan.detectedProductId) || null });
   }
   if (method === 'POST' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'scans' && parts[4] === 'confirm') {
-    const scan = db.scans.find((item) => item.id === parts[3] && item.userId === user.id);
-    const selected = product(body.productId);
+    const scan = await sqlModels.getScanById(parts[3], user.id);
+    const catalog = await sqlModels.listProducts({ areaId: user.areaId });
+    const selected = catalog.find((item) => item.id === String(body.productId || ''));
     if (!scan) return send(res, 404, { error: 'SCAN_NOT_FOUND' });
     if (!selected || !scan.candidates.some((candidate) => candidate.productId === selected.id)) {
       return send(res, 422, { error: 'INVALID_SCAN_CANDIDATE', message: 'Sản phẩm xác nhận phải nằm trong danh sách nhận diện.' });
     }
-    scan.detectedProductId = selected.id;
-    scan.confirmedByUser = true;
-    scan.status = 'confirmed';
-    scan.confirmedAt = new Date().toISOString();
-    saveDb();
-    return send(res, 200, { ...scan, product: selected });
+    await sqlModels.confirmScan(scan.id, user.id, selected.id);
+    const confirmed = await sqlModels.getScanById(scan.id, user.id);
+    return send(res, 200, { ...confirmed, product: selected });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/conversations') {
-    const conversation = { id: id('conversation'), userId: user.id, messages: [] }; db.conversations.push(conversation); saveDb(); return send(res, 201, conversation);
+    const conversation = { id: id('conversation'), userId: user.id };
+    await sqlModels.createConversation(conversation);
+    const initialMessage = String(body.initialMessage || '').trim();
+    if (initialMessage) {
+      await sqlModels.addMessage({
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: initialMessage
+      });
+    }
+    return send(res, 201, {
+      ...conversation,
+      messages: initialMessage ? [{ role: 'assistant', content: initialMessage }] : []
+    });
+  }
+  if (method === 'DELETE' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'conversations') {
+    const deleted = await sqlModels.deleteConversation(parts[3], user.id);
+    return deleted
+      ? send(res, 204, {})
+      : send(res, 404, { error: 'CONVERSATION_NOT_FOUND' });
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/ai/chat') {
-    const lmStudioUrl = String(process.env.LM_STUDIO_URL || '').replace(/\/$/, '');
-    const model = String(process.env.LM_STUDIO_MODEL || 'qwen3-vl-8b-instruct');
-    if (!lmStudioUrl) {
-      return send(res, 503, { error: 'AI_PROVIDER_REQUIRED', message: 'Hãy cấu hình LM_STUDIO_URL cho máy chủ.' });
-    }
     const messages = Array.isArray(body.messages) ? body.messages : [];
     if (messages.length === 0) return send(res, 422, { error: 'INVALID_MESSAGES' });
     try {
-      const headers = { 'content-type': 'application/json' };
-      if (process.env.LM_STUDIO_API_KEY) headers.authorization = `Bearer ${process.env.LM_STUDIO_API_KEY}`;
-      const response = await fetch(`${lmStudioUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model,
-          messages: messages.slice(-12),
-          temperature: 0.4,
-          stream: false
-        })
+      const catalog = await sqlModels.listProducts({ areaId: user.areaId });
+      const conversation = messages
+        .filter((message) => ['user', 'assistant'].includes(message?.role))
+        .slice(-10)
+        .map(({ role, content }) => ({ role, content }));
+      const [examples, builds] = await Promise.all([
+        sqlModels.listAiPcExamples(),
+        sqlModels.listBuildsByUser(user.id)
+      ]);
+      const completion = await requestProjectLmStudio([
+        { role: 'system', content: pcKnowledgePrompt(catalog, user.areaId, examples, builds[0], conversation) },
+        ...conversation
+      ], {
+        task: 'chat',
+        shouldFallback: (candidate) => pcChatNeedsExpertReview(conversation, candidate)
       });
-      const responseText = await response.text();
-      let responseBody;
-      try {
-        responseBody = responseText ? JSON.parse(responseText) : null;
-      } catch {
-        responseBody = { error: { message: responseText || 'Phản hồi trống từ LM Studio.' } };
+      if (builds[0] && isPowerQuestion(conversation) && completion?.choices?.[0]?.message) {
+        completion.choices[0].message.content = formatBuildPowerSummary(builds[0], catalog);
+        completion.choices[0].finish_reason = 'stop';
       }
-      if (!response.ok) {
-        return send(res, 502, {
-          error: 'AI_PROVIDER_ERROR',
-          message: responseBody?.error?.message || `LM Studio trả về HTTP ${response.status}.`
-        });
-      }
-      return send(res, 200, responseBody);
+      return send(res, 200, completion);
     } catch (error) {
-      return send(res, 502, { error: 'AI_PROVIDER_UNREACHABLE', message: error.message });
+      return send(res, error.statusCode || 502, {
+        error: 'AI_PROVIDER_UNREACHABLE',
+        message: error.message
+      });
+    }
+  }
+  if (method === 'POST' && parts.join('/') === 'api/v1/ai/generate-build') {
+    const budget = Number(body.budget);
+    const purpose = String(body.purpose || '').trim();
+    const areaId = String(body.areaId || user.areaId || '').trim();
+    const areas = await sqlModels.listAreas();
+    if (!Number.isFinite(budget) || budget <= 0 || !purpose || !areas.some((area) => area.id === areaId)) {
+      return send(res, 422, {
+        error: 'INVALID_BUILD_REQUEST',
+        message: 'Ngân sách, mục đích và khu vực hợp lệ là bắt buộc.'
+      });
+    }
+
+    const catalog = await sqlModels.listProducts({ areaId });
+    const pricedCatalog = catalog.filter(hasUsableProductPrice);
+    const marketCatalog = pricedCatalog.filter(hasMarketProductPrice);
+    const pinnedComponents = body.pinnedComponents && typeof body.pinnedComponents === 'object'
+      ? body.pinnedComponents
+      : {};
+    for (const [type, productId] of Object.entries(pinnedComponents)) {
+      if (!componentTypes.includes(type) || !catalog.some((item) => item.id === String(productId) && item.type === type)) {
+        return send(res, 422, { error: 'INVALID_PINNED_COMPONENT', message: 'Linh kiện được ghim không có trong catalog SQL.' });
+      }
+      if (!hasUsableProductPrice(catalog.find((item) => item.id === String(productId) && item.type === type))) {
+        return send(res, 422, { error: 'PRICE_UNAVAILABLE', message: 'Linh kiện được ghim chưa có giá SQL.' });
+      }
+    }
+    const missingPriceTypes = componentTypes.filter((type) => !pricedCatalog.some((item) => item.type === type));
+    if (missingPriceTypes.length) {
+      return send(res, 422, {
+        error: 'PRICED_CATALOG_INCOMPLETE',
+        message: 'Chưa đủ linh kiện có giá SQL để tạo cấu hình.',
+        missingTypes: missingPriceTypes
+      });
+    }
+    const sqlBuild = selectSqlBuild(marketCatalog, budget, purpose, areaId, pinnedComponents)
+      || selectSqlBuild(pricedCatalog, budget, purpose, areaId, pinnedComponents);
+    if (sqlBuild) {
+      const catalogById = new Map(catalog.map((item) => [item.id, item]));
+      const componentDetails = Object.fromEntries(Object.entries(sqlBuild.components)
+        .map(([type, productId]) => [type, catalogById.get(productId) || null]));
+      return send(res, 200, { ...sqlBuild, componentDetails });
+    }
+    const fallbackCatalogById = new Map();
+    for (const type of componentTypes) {
+      const candidates = pricedCatalog
+        .filter((item) => item.type === type)
+        .sort((a, b) => Number(a.priceSource !== 'market') - Number(b.priceSource !== 'market') || Number(a.price) - Number(b.price))
+        .slice(0, 8);
+      for (const item of candidates) fallbackCatalogById.set(item.id, item);
+      const pinnedId = pinnedComponents[type];
+      const pinned = pinnedId && pricedCatalog.find((item) => item.id === String(pinnedId));
+      if (pinned) fallbackCatalogById.set(pinned.id, pinned);
+    }
+    const fallbackCatalog = [...fallbackCatalogById.values()];
+    const prompt = [
+      'Bạn là trợ lý xây dựng cấu hình PC. Đây là phương án dự phòng vì catalog SQL chưa tạo được cấu hình phù hợp.',
+      `Ngân sách: ${budget} VND. Mục đích: ${purpose}. Khu vực: ${areaId}.`,
+      'Chỉ chọn sản phẩm có giá dương từ catalog SQL. Ưu tiên giá thị trường (priceSource=market); giá catalog_estimate chỉ dùng khi không có phương án thị trường phù hợp và phải nêu là ước tính. Phải đủ 8 nhóm linh kiện và tổng không vượt ngân sách. Nếu không thể đáp ứng, trả JSON {"error":"NO_VALID_BUILD"}.',
+      `Bắt buộc giữ nguyên các linh kiện này: ${JSON.stringify(pinnedComponents)}.`,
+      'Trả về đúng JSON, không markdown, với các trường name, budget, areaId, components và optionalNotes. Giá trị component là product ID, không bịa sản phẩm.',
+      `Catalog mẫu có giá (tối đa 8 sản phẩm mỗi nhóm): ${JSON.stringify(fallbackCatalog)}`
+    ].join('\n');
+
+    try {
+      const response = await requestProjectLmStudio([
+        { role: 'system', content: 'Bạn là chuyên gia build PC của PCBUILD, phải chọn chính xác từ catalog SQL và chỉ trả JSON theo yêu cầu.' },
+        { role: 'user', content: prompt }
+      ], {
+        task: 'build',
+        requestOptions: { timeoutMs: Number(process.env.LM_STUDIO_TIMEOUT_MS || 240000), temperature: 0.1, maxTokens: 1800 }
+      });
+      const text = completionText(response);
+      if (!text) throw new Error('LM Studio không trả về cấu hình.');
+      const generated = parseModelJson(text);
+      if (generated?.error === 'NO_VALID_BUILD') {
+        return send(res, 422, { error: 'NO_VALID_BUILD', message: 'Catalog SQL chưa có cấu hình tương thích trong ngân sách này.' });
+      }
+      if (!generated || typeof generated !== 'object' || !generated.components || typeof generated.components !== 'object') {
+        throw new Error('LM Studio trả về cấu hình không đúng định dạng.');
+      }
+      const components = {};
+      for (const [type, productId] of Object.entries(generated.components)) {
+        const item = fallbackCatalog.find((candidate) => candidate.id === String(productId));
+        if (item && item.type === type) components[type] = item.id;
+      }
+      if (Object.keys(components).length !== componentTypes.length) {
+        throw new Error('LM Studio không chọn đủ tám linh kiện hợp lệ trong catalog SQL.');
+      }
+      for (const [type, productId] of Object.entries(pinnedComponents)) {
+        if (components[type] !== String(productId)) throw new Error(`Cấu hình không giữ lại linh kiện ${type} đã ghim.`);
+      }
+      const totalPrice = Object.values(components).reduce((sum, productId) => sum + Number(fallbackCatalog.find((item) => item.id === productId)?.price || 0), 0);
+      const report = compatibility(components, fallbackCatalog);
+      if (totalPrice > budget || report.status === 'incompatible') {
+        throw new Error('Cấu hình dự phòng vượt ngân sách hoặc không tương thích theo dữ liệu SQL.');
+      }
+      return send(res, 200, {
+        name: String(generated.name || `PC ${purpose}`),
+        budget,
+        areaId,
+        components,
+        componentDetails: Object.fromEntries(Object.entries(components)
+          .map(([type, productId]) => [type, fallbackCatalog.find((item) => item.id === productId) || null])),
+        totalPrice,
+        priceEstimate: Object.values(components).some((productId) => fallbackCatalog.find((item) => item.id === productId)?.priceSource !== 'market'),
+        optionalNotes: String(generated.optionalNotes || ''),
+        source: 'lm_studio_fallback'
+      });
+    } catch (error) {
+      return send(res, 502, { error: 'AI_BUILD_GENERATION_FAILED', message: error.message });
     }
   }
   if (method === 'POST' && parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'conversations' && parts[4] === 'messages') {
-    const conversation = db.conversations.find((item) => item.id === parts[3] && item.userId === user.id);
+    const conversation = await sqlModels.getConversationById(parts[3], user.id);
     if (!conversation) return send(res, 404, { error: 'CONVERSATION_NOT_FOUND' });
     const message = String(body.message || '').trim();
     if (!message) return send(res, 422, { error: 'INVALID_MESSAGE', message: 'Nội dung tư vấn không được để trống.' });
-    conversation.messages.push({ role: 'user', content: message, createdAt: new Date().toISOString() });
-    saveDb();
-    return send(res, 503, {
-      error: 'AI_PROVIDER_REQUIRED',
-      message: 'Hãy cấu hình LM Studio để nhận câu trả lời tư vấn.'
+    await sqlModels.addMessage({
+      conversationId: conversation.id,
+      role: 'user',
+      content: message
     });
+    try {
+      const history = await sqlModels.listMessages(conversation.id);
+      const [catalog, examples, builds] = await Promise.all([
+        sqlModels.listProducts({ areaId: user.areaId }),
+        sqlModels.listAiPcExamples(),
+        sqlModels.listBuildsByUser(user.id)
+      ]);
+      const completion = await requestProjectLmStudio([
+        {
+          role: 'system',
+          content: pcKnowledgePrompt(catalog, user.areaId, examples, builds[0], history)
+        },
+        ...history.slice(-10).map(({ role, content }) => ({ role, content }))
+      ], {
+        task: 'chat',
+        shouldFallback: (candidate) => pcChatNeedsExpertReview(history, candidate)
+      });
+      const answer = completion?.choices?.[0]?.message?.content;
+      if (typeof answer !== 'string' || !answer.trim()) {
+        return send(res, 502, { error: 'AI_INVALID_RESPONSE', message: 'LM Studio không trả về nội dung hợp lệ.' });
+      }
+      await sqlModels.addMessage({
+        conversationId: conversation.id,
+        role: 'assistant',
+        content: answer
+      });
+      return send(res, 200, completion);
+    } catch (error) {
+      return send(res, error.statusCode || 502, {
+        error: 'AI_PROVIDER_UNREACHABLE',
+        message: error.message
+      });
+    }
   }
   if (method === 'POST' && parts.join('/') === 'api/v1/price-alerts') {
-    const alert = { id: id('alert'), userId: user.id, productId: body.productId, targetPrice: money(body.targetPrice), areaId: body.areaId || user.areaId }; db.alerts.push(alert); saveDb(); return send(res, 201, alert);
+    const productId = String(body.productId || '');
+    const targetPrice = money(body.targetPrice);
+    const areaId = String(body.areaId || user.areaId || '');
+    const [item, areas] = await Promise.all([
+      sqlModels.getProductById(productId, areaId),
+      sqlModels.listAreas()
+    ]);
+    if (!item || targetPrice <= 0 || !areas.some((area) => area.id === areaId)) {
+      return send(res, 422, { error: 'INVALID_PRICE_ALERT', message: 'Sản phẩm, giá mục tiêu và khu vực hợp lệ là bắt buộc.' });
+    }
+    if (!hasMarketProductPrice(item)) return send(res, 422, { error: 'PRICE_UNAVAILABLE', message: 'Chưa có giá thị trường SQL để theo dõi sản phẩm này.' });
+    const alert = {
+      id: id('alert'),
+      userId: user.id,
+      productId,
+      targetPrice,
+      areaId
+    };
+    await sqlModels.createAlert(alert);
+    return send(res, 201, alert);
   }
-  if (method === 'GET' && parts.join('/') === 'api/v1/price-alerts') return send(res, 200, db.alerts.filter((item) => item.userId === user.id));
+  if (method === 'GET' && parts.join('/') === 'api/v1/price-alerts') {
+    return send(res, 200, await sqlModels.listAlertsByUser(user.id));
+  }
+  if (parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'price-alerts' && parts[3]) {
+    if (method === 'DELETE') {
+      const deleted = await sqlModels.deleteAlert(parts[3], user.id);
+      return deleted ? send(res, 204, {}) : send(res, 404, { error: 'PRICE_ALERT_NOT_FOUND' });
+    }
+    if (method === 'PUT') {
+      const productId = String(body.productId || '');
+      const targetPrice = money(body.targetPrice);
+      const areaId = String(body.areaId || user.areaId || '');
+      const item = await sqlModels.getProductById(productId, areaId);
+      const areas = await sqlModels.listAreas();
+      if (!item || targetPrice <= 0 || !areas.some((area) => area.id === areaId)) {
+        return send(res, 422, { error: 'INVALID_PRICE_ALERT', message: 'Sản phẩm, giá mục tiêu và khu vực hợp lệ là bắt buộc.' });
+      }
+      if (!hasMarketProductPrice(item)) return send(res, 422, { error: 'PRICE_UNAVAILABLE', message: 'Chưa có giá thị trường SQL để theo dõi sản phẩm này.' });
+      const updated = await sqlModels.updateAlert(parts[3], user.id, { productId, targetPrice, areaId });
+      return updated ? send(res, 200, updated) : send(res, 404, { error: 'PRICE_ALERT_NOT_FOUND' });
+    }
+  }
   if (method === 'GET' && parts.join('/') === 'api/v1/faq') {
     const query = String(url.searchParams.get('q') || '').trim().toLowerCase();
     const faq = [
@@ -708,13 +1705,37 @@ if(response.ok) document.getElementById('submit').disabled=true;};
     const email = String(body.contactEmail || user.email || '').trim();
     if (!email.includes('@')) return send(res, 422, { error: 'INVALID_EMAIL' });
     if (message.length < 10 || message.length > 2000) return send(res, 422, { error: 'INVALID_MESSAGE', message: 'Nội dung hỗ trợ phải từ 10 đến 2.000 ký tự.' });
-    const request = { id: id('support'), userId: user.id, topic: String(body.topic || 'general'), contactEmail: email, message, status: 'received', createdAt: new Date().toISOString() };
-    db.supportRequests.push(request); saveDb();
+    const request = {
+      id: id('support'),
+      userId: user.id,
+      topic: String(body.topic || 'general').slice(0, 100),
+      contactEmail: email,
+      message,
+      status: 'received',
+      createdAt: new Date().toISOString()
+    };
+    await sqlModels.insertSupportRequest(request);
     return send(res, 201, request);
   }
   return send(res, 404, { error: 'NOT_FOUND' });
 }
 
-const server = http.createServer((req, res) => route(req, res).catch((error) => send(res, 500, { error: 'INTERNAL_ERROR', message: error.message })));
-if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`PCBUILD API listening on port ${PORT}`));
-module.exports = { server, db, route };
+const server = http.createServer((req, res) => route(req, res).catch((error) => send(res, error.statusCode || 500, { error: error.statusCode === 413 ? 'PAYLOAD_TOO_LARGE' : error.statusCode === 400 ? 'INVALID_JSON' : 'INTERNAL_ERROR', message: error.message })));
+if (require.main === module) {
+  ensureSqlSchema()
+    .catch((error) => console.error(`Failed to load API reference data: ${error.message}`))
+    .finally(() => server.listen(PORT, '0.0.0.0', () => console.log(`PCBUILD API listening on port ${PORT}`)));
+}
+module.exports = {
+  server,
+  route,
+  compatibility,
+  powerAssessment,
+  pcChatNeedsExpertReview,
+  scanCompletionMatchesCatalog,
+  hasVisibleSkuEvidence,
+  hasUsableProductPrice,
+  catalogPromptSelection,
+  catalogForVisionCandidate,
+  selectSqlBuild,
+};

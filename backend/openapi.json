@@ -135,6 +135,113 @@
         "responses": { "200": { "description": "Comparison result" }, "422": { "description": "Invalid product count" } }
       }
     },
+    "/api/v1/products": {
+      "get": {
+        "summary": "List SQL catalog products at the selected area's price",
+        "parameters": [
+          { "name": "type", "in": "query", "schema": { "type": "string" } },
+          { "name": "areaId", "in": "query", "schema": { "type": "string", "default": "hcm" } },
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "maxPrice", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Products and area prices from SQL" } }
+      }
+    },
+    "/api/v1/market/summary": {
+      "get": {
+        "summary": "Get current area prices and record a SQL history snapshot",
+        "parameters": [{ "name": "areaId", "in": "query", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Market summary" } }
+      }
+    },
+    "/api/v1/prices": {
+      "get": {
+        "summary": "Get current price and daily, monthly, or yearly SQL history",
+        "parameters": [
+          { "name": "productId", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "areaId", "in": "query", "schema": { "type": "string" } },
+          { "name": "period", "in": "query", "schema": { "type": "string", "enum": ["day", "month", "year"] } }
+        ],
+        "responses": { "200": { "description": "Current price, previous price, change, and SQL history points" } }
+      }
+    },
+    "/api/v1/compatibility/check": {
+      "post": {
+        "summary": "Check compatibility for two or more selected SQL catalog components",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["components"], "properties": { "areaId": { "type": "string" }, "components": { "type": "object", "additionalProperties": { "type": "string" } } } } } } },
+        "responses": { "200": { "description": "Compatibility report" }, "422": { "description": "Fewer than two valid components" } }
+      }
+    },
+    "/api/v1/ai/chat": {
+      "post": {
+        "summary": "Ask the local PC assistant using SQL catalog context",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["messages"], "properties": { "messages": { "type": "array", "items": { "type": "object" } } } } } } },
+        "responses": { "200": { "description": "Local model response" }, "502": { "description": "Local model unavailable" } }
+      }
+    },
+    "/api/v1/ai/scan": {
+      "post": {
+        "summary": "Analyze a product image with LM Studio and archive the result in SQL",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["imageBase64", "imageMimeType"], "properties": { "imageBase64": { "type": "string" }, "imageMimeType": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Scan result saved in SQL" }, "422": { "description": "Invalid image" }, "502": { "description": "LM Studio vision model unavailable" } }
+      }
+    },
+    "/api/v1/ai/generate-build": {
+      "post": {
+        "summary": "Generate a build from SQL first, using LM Studio when needed",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["budget", "purpose"], "properties": { "budget": { "type": "integer" }, "purpose": { "type": "string" }, "areaId": { "type": "string" }, "pinnedComponents": { "type": "object", "additionalProperties": { "type": "string" } } } } } } },
+        "responses": { "200": { "description": "SQL or LM Studio fallback build" }, "422": { "description": "No valid build in budget" }, "502": { "description": "LM Studio fallback failed" } }
+      }
+    },
+    "/api/v1/scans": {
+      "get": {
+        "summary": "List the current user's SQL scan history",
+        "security": [{ "bearerAuth": [] }],
+        "responses": { "200": { "description": "Scan history" } }
+      }
+    },
+    "/api/v1/scans/{id}": {
+      "get": {
+        "summary": "Get a scan record and its archived image",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Scan details" }, "404": { "description": "Not found" } }
+      },
+      "delete": {
+        "summary": "Delete the current user's SQL scan and archived image",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Scan deleted" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/api/v1/price-alerts": {
+      "get": { "summary": "List the current user's price alerts", "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Price alerts" } } },
+      "post": {
+        "summary": "Create a SQL-backed price alert",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["productId", "targetPrice"], "properties": { "productId": { "type": "string" }, "targetPrice": { "type": "integer" }, "areaId": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Alert created" }, "422": { "description": "Invalid alert" } }
+      }
+    },
+    "/api/v1/price-alerts/{id}": {
+      "put": {
+        "summary": "Edit a SQL-backed price alert",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["productId", "targetPrice", "areaId"], "properties": { "productId": { "type": "string" }, "targetPrice": { "type": "integer" }, "areaId": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Alert updated" }, "404": { "description": "Not found" } }
+      },
+      "delete": {
+        "summary": "Delete a SQL-backed price alert",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Alert deleted" }, "404": { "description": "Not found" } }
+      }
+    },
     "/api/v1/scans/{id}/confirm": {
       "post": {
         "summary": "Confirm an AI scan candidate",

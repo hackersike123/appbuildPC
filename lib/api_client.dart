@@ -21,6 +21,14 @@ class ApiClient {
   String? buildId;
   final productIdsByName = <String, String>{};
   final productPowerByName = <String, int>{};
+  final productRecommendedPsuByName = <String, int>{};
+  final productPriceSourceByName = <String, String>{};
+  http.Client Function() _clientFactory = () => http.Client();
+
+  @visibleForTesting
+  void setClientFactoryForTesting(http.Client Function() factory) {
+    _clientFactory = factory;
+  }
 
   String get baseUrl {
     const configuredUrl = String.fromEnvironment('API_BASE_URL');
@@ -34,7 +42,7 @@ class ApiClient {
     String path, {
     Map<String, dynamic>? body,
     bool auth = false,
-    Duration? timeout = const Duration(seconds: 8),
+    Duration? timeout = const Duration(seconds: 30),
   }) async {
     final headers = <String, String>{'content-type': 'application/json'};
     if (auth && token != null) {
@@ -46,7 +54,7 @@ class ApiClient {
     final request = http.Request(method, Uri.parse('$baseUrl$path'))
       ..headers.addAll(headers);
     if (body != null) request.body = jsonEncode(body);
-    final client = http.Client();
+    final client = _clientFactory();
     try {
       final response = timeout == null
           ? await client.send(request)
@@ -206,12 +214,68 @@ class ApiClient {
     await _request('POST', '/api/v1/notifications/read', auth: true);
   }
 
+  Future<List<Map<String, dynamic>>> priceAlerts() async {
+    final data = await _request('GET', '/api/v1/price-alerts', auth: true);
+    return (data as List)
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> createPriceAlert({
+    required String productId,
+    required int targetPrice,
+    String? areaId,
+  }) async {
+    final data = await _request(
+      'POST',
+      '/api/v1/price-alerts',
+      auth: true,
+      body: {
+        'productId': productId,
+        'targetPrice': targetPrice,
+        'areaId': areaId ?? currentUser?['areaId']?.toString() ?? 'hcm',
+      },
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<Map<String, dynamic>> updatePriceAlert({
+    required String id,
+    required String productId,
+    required int targetPrice,
+    required String areaId,
+  }) async {
+    final data = await _request(
+      'PUT',
+      '/api/v1/price-alerts/${Uri.encodeComponent(id)}',
+      auth: true,
+      body: {
+        'productId': productId,
+        'targetPrice': targetPrice,
+        'areaId': areaId,
+      },
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<void> deletePriceAlert(String id) async {
+    await _request(
+      'DELETE',
+      '/api/v1/price-alerts/${Uri.encodeComponent(id)}',
+      auth: true,
+    );
+  }
+
   Future<List<Map<String, dynamic>>> products(
     String type, {
     String query = '',
     int? maxPrice,
+    String? areaId,
   }) async {
-    final params = <String, String>{'type': type};
+    final params = <String, String>{
+      'type': type,
+      'areaId': areaId ?? currentUser?['areaId']?.toString() ?? 'hcm',
+    };
     if (query.trim().isNotEmpty) params['q'] = query.trim();
     if (maxPrice != null) params['maxPrice'] = '$maxPrice';
     final data = await _request(
@@ -223,13 +287,16 @@ class ApiClient {
         .toList();
   }
 
-  Future<Map<String, dynamic>> compareProducts(List<String> productIds) async {
+  Future<Map<String, dynamic>> compareProducts(
+    List<String> productIds, {
+    String? areaId,
+  }) async {
     if (productIds.length < 2 || productIds.length > 3) {
       throw ApiException('Cần chọn từ 2 đến 3 sản phẩm để so sánh.');
     }
     final data = await _request(
       'GET',
-      '/api/v1/compare?productIds=${productIds.map(Uri.encodeQueryComponent).join(',')}',
+      '/api/v1/compare?productIds=${productIds.map(Uri.encodeQueryComponent).join(',')}&areaId=${Uri.encodeQueryComponent(areaId ?? currentUser?['areaId']?.toString() ?? 'hcm')}',
     );
     return Map<String, dynamic>.from(data as Map);
   }
@@ -261,7 +328,35 @@ class ApiClient {
 
   Future<Map<String, dynamic>> marketSummary(String areaId) async {
     return Map<String, dynamic>.from(
-      await _request('GET', '/api/v1/market/summary?areaId=$areaId'),
+      await _request(
+        'GET',
+        '/api/v1/market/summary?areaId=${Uri.encodeQueryComponent(areaId)}',
+        auth: token != null,
+      ),
+    );
+  }
+
+  // Build generation uses SQL first; LM Studio is the API-side AI fallback.
+  Future<Map<String, dynamic>> generateBuildSuggestion({
+    required int budget,
+    required String purpose,
+    required String areaId,
+    Map<String, String> pinnedComponents = const {},
+    Duration timeout = const Duration(minutes: 2),
+  }) async {
+    return Map<String, dynamic>.from(
+      await _request(
+        'POST',
+        '/api/v1/ai/generate-build',
+        body: {
+          'budget': budget,
+          'purpose': purpose,
+          'areaId': areaId,
+          'pinnedComponents': pinnedComponents,
+        },
+        auth: true,
+        timeout: timeout,
+      ),
     );
   }
 
@@ -363,14 +458,36 @@ class ApiClient {
       'POST',
       '/api/v1/compatibility/check',
       auth: true,
-      body: {'components': components},
+      body: {
+        'components': components,
+        'areaId': currentUser?['areaId']?.toString() ?? 'hcm',
+      },
     );
     return Map<String, dynamic>.from(data);
   }
 
-  Future<Map<String, dynamic>> createConversation() async {
+  Future<Map<String, dynamic>> createConversation({
+    String? initialMessage,
+  }) async {
     return Map<String, dynamic>.from(
-      await _request('POST', '/api/v1/conversations', auth: true),
+      await _request(
+        'POST',
+        '/api/v1/conversations',
+        auth: true,
+        body: {
+          ...?initialMessage == null || initialMessage.trim().isEmpty
+              ? null
+              : {'initialMessage': initialMessage.trim()},
+        },
+      ),
+    );
+  }
+
+  Future<void> deleteConversation(String conversationId) async {
+    await _request(
+      'DELETE',
+      '/api/v1/conversations/${Uri.encodeComponent(conversationId)}',
+      auth: true,
     );
   }
 
@@ -390,15 +507,70 @@ class ApiClient {
     return Map<String, dynamic>.from(data as Map);
   }
 
+  Future<Map<String, dynamic>> analyzeProductImage({
+    required Uint8List imageBytes,
+    required String imageMimeType,
+  }) async {
+    final data = await _request(
+      'POST',
+      '/api/v1/ai/scan',
+      auth: true,
+      timeout: const Duration(minutes: 13),
+      body: {
+        'imageMimeType': imageMimeType,
+        'imageBase64': base64Encode(imageBytes),
+      },
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> scans() async {
+    final data = await _request('GET', '/api/v1/scans', auth: true);
+    return (data as List)
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> scanDetails(String scanId) async {
+    final data = await _request(
+      'GET',
+      '/api/v1/scans/${Uri.encodeComponent(scanId)}',
+      auth: true,
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<void> deleteScan(String scanId) async {
+    await _request(
+      'DELETE',
+      '/api/v1/scans/${Uri.encodeComponent(scanId)}',
+      auth: true,
+    );
+  }
+
   Future<Map<String, dynamic>> confirmScan(
     String scanId,
     String productId,
   ) async {
     final data = await _request(
       'POST',
-      '/api/v1/scans/$scanId/confirm',
+      '/api/v1/scans/${Uri.encodeComponent(scanId)}/confirm',
       auth: true,
       body: {'productId': productId},
+    );
+    return Map<String, dynamic>.from(data as Map);
+  }
+
+  Future<Map<String, dynamic>> priceHistory(
+    String productId, {
+    String? areaId,
+    String period = 'day',
+  }) async {
+    final resolvedAreaId =
+        areaId ?? currentUser?['areaId']?.toString() ?? 'hcm';
+    final data = await _request(
+      'GET',
+      '/api/v1/prices?productId=${Uri.encodeQueryComponent(productId)}&areaId=${Uri.encodeQueryComponent(resolvedAreaId)}&period=${Uri.encodeQueryComponent(period)}',
     );
     return Map<String, dynamic>.from(data as Map);
   }
@@ -441,6 +613,7 @@ class ApiClient {
         'POST',
         '/api/v1/conversations/$conversationId/messages',
         auth: true,
+        timeout: const Duration(minutes: 11),
         body: {'message': message},
       ),
     );
@@ -449,6 +622,7 @@ class ApiClient {
   Future<String> sendLmStudioMessage(
     String message, {
     List<Map<String, String>> history = const [],
+    Duration timeout = const Duration(minutes: 5),
   }) async {
     if (!AIConfig.enabled) {
       throw ApiException('LM Studio đang bị tắt trong cấu hình ứng dụng.');
@@ -461,16 +635,12 @@ class ApiClient {
       ...history.take(10),
       {'role': 'user', 'content': message},
     ];
-    final headers = <String, String>{'content-type': 'application/json'};
-    if (AIConfig.apiKey.isNotEmpty) {
-      headers['authorization'] = 'Bearer $token';
-    }
     final text = await _request(
       'POST',
       '/api/v1/ai/chat',
       auth: true,
       body: {'messages': messages},
-      timeout: null,
+      timeout: timeout,
     );
     if (text is! Map ||
         text['choices'] is! List ||

@@ -1,14 +1,18 @@
 // The screen-level async actions intentionally report through their active route.
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'api_client.dart';
-import 'services/lm_studio_service.dart';
 
 void main() => runApp(const PcBuildApp());
 
@@ -19,6 +23,37 @@ const panel2 = Color(0xff171e28);
 const stroke = Color(0xff263140);
 const muted = Color(0xff8d99a8);
 const greenPanel = Color(0xff173f38);
+const _androidLifecycleChannel = MethodChannel('appbuildpc/app_lifecycle');
+
+Future<void> _moveAppToBackground() async {
+  try {
+    await _androidLifecycleChannel.invokeMethod<void>('moveToBackground');
+  } catch (_) {
+    // The native handler is only available on Android. Keep web and widget
+    // tests usable if the platform channel is not installed.
+  }
+}
+
+Widget _keepAndroidAppInBackgroundOnRootBack(
+  BuildContext context, {
+  required Widget child,
+}) {
+  final canPopRoute = Navigator.of(context).canPop();
+  final moveToBackground =
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.android &&
+      !canPopRoute;
+
+  return PopScope<Object?>(
+    canPop: !moveToBackground,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop && moveToBackground) {
+        unawaited(_moveAppToBackground());
+      }
+    },
+    child: child,
+  );
+}
 
 Future<bool> requestLocationPermission(BuildContext context) async {
   if (kIsWeb) {
@@ -50,6 +85,41 @@ double productPriceInMillions(String value) {
   return (double.tryParse(digits) ?? 0) / 1000000;
 }
 
+double? parseApiNumber(dynamic value) {
+  if (value is num) return value.toDouble();
+  return double.tryParse(value?.toString().trim() ?? '');
+}
+
+String formatVnd(dynamic value) {
+  final amount = (parseApiNumber(value) ?? 0).round().toString();
+  final grouped = amount.replaceAllMapped(
+    RegExp(r'\B(?=(\d{3})+(?!\d))'),
+    (_) => '.',
+  );
+  return '$groupedđ';
+}
+
+bool matchesCatalogSearch(String value, String query) {
+  final name = value.toLowerCase();
+  final term = query.trim().toLowerCase();
+  if (term.isEmpty) return true;
+  if (!RegExp(r'^\d+$').hasMatch(term)) return name.contains(term);
+  var start = 0;
+  while (true) {
+    final index = name.indexOf(term, start);
+    if (index < 0) return false;
+    final end = index + term.length;
+    final beforeIsDigit =
+        index > 0 && _isAsciiDigit(name.codeUnitAt(index - 1));
+    final afterIsDigit =
+        end < name.length && _isAsciiDigit(name.codeUnitAt(end));
+    if (!beforeIsDigit && !afterIsDigit) return true;
+    start = index + 1;
+  }
+}
+
+bool _isAsciiDigit(int codeUnit) => codeUnit >= 48 && codeUnit <= 57;
+
 class Product {
   const Product(
     this.name,
@@ -57,12 +127,22 @@ class Product {
     this.detail,
     this.image, {
     this.used = false,
+    this.hasPrice = true,
+    this.priceEstimate = false,
+    this.id = '',
+    this.powerW = 0,
+    this.priceSource = 'missing',
   });
   final String name;
   final String price;
   final String detail;
   final String image;
   final bool used;
+  final bool hasPrice;
+  final bool priceEstimate;
+  final String id;
+  final int powerW;
+  final String priceSource;
 }
 
 class PcBuildApp extends StatelessWidget {
@@ -209,45 +289,51 @@ class Shell extends StatelessWidget {
     this.subtitle,
     this.back = false,
     this.action,
+    this.bottomNavigationBar,
   });
   final Widget child;
   final String? title;
   final String? subtitle;
   final bool back;
   final Widget? action;
+  final Widget? bottomNavigationBar;
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: title == null
-        ? null
-        : AppBar(
-            automaticallyImplyLeading: false,
-            titleSpacing: 18,
-            leading: back
-                ? IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.chevron_left),
-                  )
-                : null,
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title!,
-                  style: const TextStyle(
-                    fontSize: 21,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                if (subtitle != null)
+  Widget build(BuildContext context) => _keepAndroidAppInBackgroundOnRootBack(
+    context,
+    child: Scaffold(
+      appBar: title == null
+          ? null
+          : AppBar(
+              automaticallyImplyLeading: false,
+              titleSpacing: 18,
+              leading: back
+                  ? IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.chevron_left),
+                    )
+                  : null,
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    subtitle!,
-                    style: const TextStyle(fontSize: 12, color: muted),
+                    title!,
+                    style: const TextStyle(
+                      fontSize: 21,
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
-              ],
+                  if (subtitle != null)
+                    Text(
+                      subtitle!,
+                      style: const TextStyle(fontSize: 12, color: muted),
+                    ),
+                ],
+              ),
+              actions: [?action, const SizedBox(width: 10)],
             ),
-            actions: [?action, const SizedBox(width: 10)],
-          ),
-    body: child,
+      body: child,
+      bottomNavigationBar: bottomNavigationBar,
+    ),
   );
 }
 
@@ -888,66 +974,77 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
+  final _homeKey = GlobalKey<_HomeTabState>();
+  final _buildKey = GlobalKey<_BuildTabState>();
   int tab = 0;
   int savedVersion = 0;
   late String areaId = widget.areaId;
   late String areaName = widget.areaName;
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: IndexedStack(
-      index: tab,
-      children: [
-        HomeTab(
-          onOpen: _open,
-          onTabOpen: _switchTab,
-          areaId: areaId,
-          areaName: areaName,
-          onAreaChanged: (id, name) => setState(() {
-            areaId = id;
-            areaName = name;
-          }),
-        ),
-        const BuildTab(),
-        SavedTab(key: ValueKey(savedVersion)),
-        const ChatTab(),
-        const AccountTab(),
-      ],
-    ),
-    bottomNavigationBar: SizedBox(
-      height: 72,
-      child: NavigationBar(
-        backgroundColor: panel,
-        indicatorColor: Colors.transparent,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        selectedIndex: tab,
-        onDestinationSelected: _switchTab,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home),
-            label: 'Trang chủ',
+  Widget build(BuildContext context) => _keepAndroidAppInBackgroundOnRootBack(
+    context,
+    child: Scaffold(
+      body: IndexedStack(
+        index: tab,
+        children: [
+          HomeTab(
+            key: _homeKey,
+            onOpen: _open,
+            onTabOpen: _switchTab,
+            areaId: areaId,
+            areaName: areaName,
+            onAreaChanged: (id, name) => setState(() {
+              areaId = id;
+              areaName = name;
+            }),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.memory_outlined),
-            selectedIcon: Icon(Icons.memory),
-            label: 'Build',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.bookmark_border),
-            selectedIcon: Icon(Icons.bookmark),
-            label: 'Đã lưu',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.chat_bubble_outline),
-            selectedIcon: Icon(Icons.chat_bubble),
-            label: 'Tư vấn',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
-            label: 'Tài khoản',
+          BuildTab(key: _buildKey),
+          SavedTab(key: ValueKey(savedVersion)),
+          ChatTab(onOpenBuild: _openBuildTab),
+          AccountTab(
+            onAreaChanged: (id, name) => setState(() {
+              areaId = id;
+              areaName = name;
+            }),
           ),
         ],
+      ),
+      bottomNavigationBar: SizedBox(
+        height: 72,
+        child: NavigationBar(
+          backgroundColor: panel,
+          indicatorColor: Colors.transparent,
+          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          selectedIndex: tab,
+          onDestinationSelected: _switchTab,
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.home_outlined),
+              selectedIcon: Icon(Icons.home),
+              label: 'Trang chủ',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.memory_outlined),
+              selectedIcon: Icon(Icons.memory),
+              label: 'Build',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.bookmark_border),
+              selectedIcon: Icon(Icons.bookmark),
+              label: 'Đã lưu',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.chat_bubble_outline),
+              selectedIcon: Icon(Icons.chat_bubble),
+              label: 'Tư vấn',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.person_outline),
+              selectedIcon: Icon(Icons.person),
+              label: 'Tài khoản',
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -959,7 +1056,11 @@ class _MainScreenState extends State<MainScreen> {
       tab = value;
       if (value == 2) savedVersion++;
     });
+    if (value == 0) _homeKey.currentState?._loadBuild();
+    if (value == 1) _buildKey.currentState?._loadLatestBuild();
   }
+
+  void _openBuildTab() => _switchTab(1);
 }
 
 class HomeTab extends StatefulWidget {
@@ -997,6 +1098,18 @@ class _HomeTabState extends State<HomeTab> {
     _loadMarket();
     _loadBuild();
     _loadNotifications();
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.areaId != widget.areaId ||
+        oldWidget.areaName != widget.areaName) {
+      currentAreaId = widget.areaId;
+      currentAreaName = widget.areaName;
+      loadingMarket = true;
+      _loadMarket();
+    }
   }
 
   Future<void> _loadNotifications() async {
@@ -1103,6 +1216,7 @@ class _HomeTabState extends State<HomeTab> {
         areaId: chosen['id'] as String,
       );
       final area = Map<String, dynamic>.from(result['area'] as Map);
+      await ApiClient.instance.updateProfile(areaId: area['id'] as String);
       currentAreaId = area['id'] as String;
       currentAreaName = area['name'] as String;
       if (mounted) {
@@ -1185,8 +1299,12 @@ class _HomeTabState extends State<HomeTab> {
                         (item) => item['read'] == false,
                       )) ...[
                         const SizedBox(width: 5),
-                        Text(
-                          '${notifications.where((item) => item['read'] == false).length}',
+                        Flexible(
+                          child: Text(
+                            '${notifications.where((item) => item['read'] == false).length}',
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                          ),
                         ),
                       ],
                     ],
@@ -1201,7 +1319,7 @@ class _HomeTabState extends State<HomeTab> {
             onTap: _changeArea,
             child: InfoTile(
               icon: Icons.location_on_outlined,
-              text: '$currentAreaName • GPS',
+              text: 'Giá theo khu vực · $currentAreaName',
               trailing: 'Thay đổi',
             ),
           ),
@@ -1209,7 +1327,7 @@ class _HomeTabState extends State<HomeTab> {
           InfoTile(
             icon: Icons.check_circle_outline,
             text:
-                'Giá thị trường tại $currentAreaName\nNguồn: giá chào bán mẫu • ${marketUpdatedAt == null ? 'đang tải thời điểm cập nhật' : 'cập nhật ${marketUpdatedAt!.replaceFirst('T', ' ').split('.').first}'}',
+                'Giá thị trường tại $currentAreaName\nNguồn: SQL • ${marketUpdatedAt == null ? 'đang tải thời điểm cập nhật' : 'cập nhật ${marketUpdatedAt!.replaceFirst('T', ' ').split('.').first}'}',
           ),
           const SizedBox(height: 16),
           MarketCard(
@@ -1254,7 +1372,15 @@ class _HomeTabState extends State<HomeTab> {
               QuickCard(
                 icon: Icons.camera_alt_outlined,
                 text: 'Quét SP',
-                onTap: () => widget.onOpen(const ScannerScreen()),
+                onTap: () => widget.onOpen(
+                  ScannerScreen(
+                    onOpenBuild: () {
+                      Navigator.of(context).pop();
+                      Navigator.of(context).pop();
+                      widget.onTabOpen(1);
+                    },
+                  ),
+                ),
               ),
               QuickCard(
                 icon: Icons.scatter_plot,
@@ -1264,7 +1390,14 @@ class _HomeTabState extends State<HomeTab> {
               QuickCard(
                 icon: Icons.chat_bubble_outline,
                 text: 'Tư vấn',
-                onTap: () => widget.onOpen(const ChatTab()),
+                onTap: () => widget.onOpen(
+                  ChatTab(
+                    onOpenBuild: () {
+                      Navigator.of(context).pop();
+                      widget.onTabOpen(1);
+                    },
+                  ),
+                ),
               ),
               QuickCard(
                 icon: Icons.category_outlined,
@@ -1291,8 +1424,9 @@ class _HomeTabState extends State<HomeTab> {
 }
 
 class BuildTab extends StatefulWidget {
-  const BuildTab({super.key, this.initialBuild});
+  const BuildTab({super.key, this.initialBuild, this.loadLatest = true});
   final Map<String, dynamic>? initialBuild;
+  final bool loadLatest;
   @override
   State<BuildTab> createState() => _BuildTabState();
 }
@@ -1303,6 +1437,8 @@ class _BuildTabState extends State<BuildTab> {
   Map<String, dynamic>? loadedBuild;
   final selectedIds = <String, String>{};
   final powers = <String, int>{};
+  final missingPriceTypes = <String>{};
+  final estimatePriceTypes = <String>{};
   final selected = <String, String>{
     'CPU': 'Chọn CPU',
     'MAINBOARD': 'Chọn MAINBOARD',
@@ -1314,9 +1450,13 @@ class _BuildTabState extends State<BuildTab> {
     'TẢN NHIỆT': 'Chọn tản nhiệt',
   };
   final prices = <String, double>{};
+  Timer? _compatibilityDebounce;
+  Map<String, dynamic>? liveCompatibility;
+  bool checkingCompatibility = false;
   bool get isComplete =>
       selected.values.every((value) => !value.startsWith('Chọn'));
-  Map<String, dynamic>? get _currentBuild => widget.initialBuild ?? loadedBuild;
+  bool get canCheckCompatibility => selectedIds.length >= 2;
+  Map<String, dynamic>? get _currentBuild => loadedBuild ?? widget.initialBuild;
   String get _buildTitle => _currentBuild?['name']?.toString() ?? 'Build mới';
   String get _buildSubtitle {
     final areaId = _currentBuild?['areaId']?.toString();
@@ -1326,7 +1466,10 @@ class _BuildTabState extends State<BuildTab> {
       'danang': 'Đà Nẵng',
     };
     final area = areas[areaId] ?? 'Khu vực hiện tại';
-    return '${selectedIds.length}/8 linh kiện • $area';
+    final selectedCount = selected.values
+        .where((value) => !value.startsWith('Chọn'))
+        .length;
+    return '$selectedCount/8 linh kiện • $area';
   }
 
   @override
@@ -1335,18 +1478,24 @@ class _BuildTabState extends State<BuildTab> {
     final build = widget.initialBuild;
     if (build == null) {
       ApiClient.instance.buildId = null;
-      _loadLatestBuild();
+      if (widget.loadLatest) _loadLatestBuild();
       return;
     }
     _applyBuild(build);
   }
+
+  Future<void> reloadLatestBuild() => _loadLatestBuild();
 
   Future<void> _loadLatestBuild() async {
     if (ApiClient.instance.token == null) return;
     setState(() => loadingBuild = true);
     try {
       final builds = await ApiClient.instance.builds();
-      if (!mounted || builds.isEmpty) return;
+      if (!mounted) return;
+      if (builds.isEmpty) {
+        ApiClient.instance.buildId = null;
+        return;
+      }
       _applyBuild(builds.first);
     } catch (error) {
       if (mounted) {
@@ -1360,6 +1509,14 @@ class _BuildTabState extends State<BuildTab> {
   void _applyBuild(Map<String, dynamic> build) {
     loadedBuild = build;
     ApiClient.instance.buildId = build['id'] as String?;
+    selectedIds.clear();
+    powers.clear();
+    prices.clear();
+    selected.updateAll(
+      (type, _) => type == 'PSU' ? 'Chọn nguồn' : 'Chọn $type',
+    );
+    missingPriceTypes.clear();
+    estimatePriceTypes.clear();
     final components = build['components'];
     if (components is! Map) return;
     for (final entry in components.entries) {
@@ -1367,30 +1524,65 @@ class _BuildTabState extends State<BuildTab> {
       final item = entry.value;
       if (item is Map) {
         selected[type] = item['name']?.toString() ?? selected[type]!;
-        prices[type] = ((item['price'] as num?)?.toDouble() ?? 0) / 1000000;
+        final itemPrice = parseApiNumber(item['price']) ?? 0;
+        prices[type] = itemPrice / 1000000;
+        if (itemPrice <= 0) {
+          missingPriceTypes.add(type);
+        } else if (item['priceSource'] != 'market') {
+          estimatePriceTypes.add(type);
+        }
         selectedIds[type] = item['id']?.toString() ?? '';
-        powers[type] = (item['power'] as num?)?.toInt() ?? 0;
+        powers[type] = (parseApiNumber(item['power']) ?? 0).toInt();
       }
     }
     if (mounted) setState(() {});
+    if (selectedIds.length >= 2) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scheduleCompatibilityCheck();
+      });
+    }
+  }
+
+  Future<void> _openCompatibilityDetails() async {
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CompatibilityScreen(report: liveCompatibility),
+      ),
+    );
+    if (changed == true) await _loadLatestBuild();
   }
 
   Future<void> _choose(String type) async {
-    final result = await Navigator.push<(String, double)>(
+    final result = await Navigator.push<Product>(
       context,
       MaterialPageRoute(
         builder: (_) => ProductListScreen(
           componentType: type,
-          onSelected: (name, price) => Navigator.pop(context, (name, price)),
+          areaId:
+              _currentBuild?['areaId']?.toString() ??
+              ApiClient.instance.currentUser?['areaId']?.toString() ??
+              'hcm',
+          onSelected: (product) => Navigator.pop(context, product),
         ),
       ),
     );
     if (result != null) {
+      final productId = result.id;
       setState(() {
-        selected[type] = result.$1;
-        prices[type] = result.$2;
-        powers[type] = ApiClient.instance.productPowerByName[result.$1] ?? 0;
+        selected[type] = result.name;
+        prices[type] = productPriceInMillions(result.price);
+        missingPriceTypes.remove(type);
+        if (result.priceSource == 'market') {
+          estimatePriceTypes.remove(type);
+        } else {
+          estimatePriceTypes.add(type);
+        }
+        powers[type] = result.powerW;
         saved = false;
+        if (productId.isNotEmpty) {
+          selectedIds[type] = productId;
+        }
       });
       if (ApiClient.instance.token == null) {
         if (mounted) {
@@ -1401,8 +1593,7 @@ class _BuildTabState extends State<BuildTab> {
         }
         return;
       }
-      final productId = ApiClient.instance.productIdsByName[result.$1];
-      if (productId == null || productId.isEmpty) {
+      if (productId.isEmpty) {
         if (mounted) {
           showDemoMessage(context, 'Sản phẩm chưa có mã API hợp lệ.');
         }
@@ -1410,13 +1601,63 @@ class _BuildTabState extends State<BuildTab> {
       }
       selectedIds[type] = productId;
       try {
-        await ApiClient.instance.updateComponent(type, productId);
+        final updatedBuild = await ApiClient.instance.updateComponent(
+          type,
+          productId,
+        );
+        if (mounted) {
+          setState(() => loadedBuild = updatedBuild);
+          _scheduleCompatibilityCheck();
+        }
       } catch (error) {
         if (mounted) {
           showDemoMessage(context, 'Chưa đồng bộ được linh kiện: $error');
         }
       }
     }
+  }
+
+  void _scheduleCompatibilityCheck() {
+    _compatibilityDebounce?.cancel();
+    if (selectedIds.length < 2 || ApiClient.instance.token == null) {
+      setState(() {
+        liveCompatibility = null;
+        checkingCompatibility = false;
+      });
+      return;
+    }
+    setState(() {
+      checkingCompatibility = true;
+      liveCompatibility = null;
+    });
+    _compatibilityDebounce = Timer(const Duration(milliseconds: 450), () async {
+      final selectedSnapshot = Map<String, String>.from(selectedIds);
+      try {
+        final report = await ApiClient.instance.checkBuild(selectedSnapshot);
+        if (mounted && mapEquals(selectedSnapshot, selectedIds)) {
+          setState(() {
+            liveCompatibility = report;
+            checkingCompatibility = false;
+          });
+        }
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            checkingCompatibility = false;
+            liveCompatibility = {
+              'status': 'error',
+              'message': 'Chưa kiểm tra được: $error',
+            };
+          });
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _compatibilityDebounce?.cancel();
+    super.dispose();
   }
 
   Future<void> _removeComponent(String type) async {
@@ -1447,14 +1688,21 @@ class _BuildTabState extends State<BuildTab> {
         return;
       }
       try {
-        await ApiClient.instance.updateComponent(type, null);
+        final updatedBuild = await ApiClient.instance.updateComponent(
+          type,
+          null,
+        );
         if (!mounted) return;
         setState(() {
           selected[type] = 'Chọn $type';
           prices[type] = 0;
+          missingPriceTypes.remove(type);
+          estimatePriceTypes.remove(type);
           selectedIds.remove(type);
+          loadedBuild = updatedBuild;
           saved = false;
         });
+        _scheduleCompatibilityCheck();
         showDemoMessage(context, 'Đã gỡ bỏ $type khỏi cấu hình.');
       } catch (error) {
         if (mounted) {
@@ -1465,7 +1713,7 @@ class _BuildTabState extends State<BuildTab> {
   }
 
   Future<void> _deleteCurrentBuild() async {
-    final id = widget.initialBuild?['id']?.toString();
+    final id = _currentBuild?['id']?.toString();
     if (id == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1488,8 +1736,25 @@ class _BuildTabState extends State<BuildTab> {
     try {
       await ApiClient.instance.deleteBuild(id);
       if (mounted) {
-        showDemoMessage(context, 'Đã xóa cấu hình.');
-        Navigator.pop(context, true);
+        if (widget.initialBuild != null) {
+          showDemoMessage(context, 'Đã xóa cấu hình.');
+          Navigator.pop(context, true);
+        } else {
+          setState(() {
+            loadedBuild = null;
+            saved = false;
+            selectedIds.clear();
+            powers.clear();
+            prices.clear();
+            missingPriceTypes.clear();
+            estimatePriceTypes.clear();
+            selected.updateAll(
+              (type, _) => type == 'PSU' ? 'Chọn nguồn' : 'Chọn $type',
+            );
+          });
+          ApiClient.instance.buildId = null;
+          showDemoMessage(context, 'Đã xóa cấu hình.');
+        }
       }
     } catch (error) {
       if (mounted) showDemoMessage(context, 'Không thể xóa cấu hình: $error');
@@ -1497,17 +1762,40 @@ class _BuildTabState extends State<BuildTab> {
   }
 
   String _total() {
+    if (missingPriceTypes.isNotEmpty) return 'Thiếu giá SQL';
     final total = prices.values.fold<double>(0, (sum, value) => sum + value);
-    return '${total.toStringAsFixed(2).replaceAll('.', ',')}tr';
+    final formatted = '${total.toStringAsFixed(2).replaceAll('.', ',')}tr';
+    return estimatePriceTypes.isEmpty ? formatted : '$formatted*';
   }
 
   int get _estimatedPower =>
-      powers.values.fold<int>(0, (sum, value) => sum + value);
-  int get _recommendedPsu => _estimatedPower == 0
-      ? 0
-      : (((_estimatedPower + 150 + 49) ~/ 50) * 50).clamp(450, 2000);
+      selectedIds.keys.fold<int>(0, (sum, type) => sum + (powers[type] ?? 0));
+  int get _recommendedPsu {
+    if (selectedIds.isEmpty) return 0;
+    final fromApi =
+        parseApiNumber(_currentBuild?['recommendedPsu'])?.round() ?? 0;
+    final gpu = selected['GPU'];
+    final manufacturerMinimum =
+        ApiClient.instance.productRecommendedPsuByName[gpu] ?? 0;
+    final calculated = ((_estimatedPower * 1.3 + 100 + 49) / 50).floor() * 50;
+    return math
+        .max(450, math.max(fromApi, math.max(manufacturerMinimum, calculated)))
+        .clamp(450, 2000)
+        .toInt();
+  }
 
   Future<void> _saveBuild() async {
+    if (missingPriceTypes.isNotEmpty) {
+      showDemoMessage(context, 'Hãy bổ sung giá SQL trước khi lưu build này.');
+      return;
+    }
+    final selectedCount = selectedIds.values
+        .where((productId) => productId.isNotEmpty)
+        .length;
+    if (selectedCount == 0) {
+      showDemoMessage(context, 'Hãy chọn ít nhất một linh kiện trước khi lưu.');
+      return;
+    }
     if (ApiClient.instance.token == null) {
       showDemoMessage(context, 'Hãy đăng nhập để lưu cấu hình vào tài khoản.');
       return;
@@ -1523,7 +1811,12 @@ class _BuildTabState extends State<BuildTab> {
       }
       if (!mounted) return;
       setState(() => saved = true);
-      showDemoMessage(context, 'Đã lưu đầy đủ cấu hình lên tài khoản.');
+      showDemoMessage(
+        context,
+        selectedCount == selected.length
+            ? 'Đã lưu đầy đủ cấu hình lên tài khoản.'
+            : 'Đã lưu $selectedCount/8 linh kiện lên tài khoản.',
+      );
     } catch (error) {
       if (mounted) showDemoMessage(context, 'Không thể lưu cấu hình: $error');
     }
@@ -1562,23 +1855,47 @@ class _BuildTabState extends State<BuildTab> {
             progress: selectedIds.length / 8,
           ),
           ProgressLine(
-            label: 'LƯỢNG ĐIỆN TIÊU THỤ',
-            value: _estimatedPower == 0
+            label: 'TẢI ƯỚC TÍNH • PSU ĐỀ NGHỊ',
+            value: selectedIds.isEmpty
                 ? 'Chưa đủ dữ liệu'
-                : '${_estimatedPower}W / ${_recommendedPsu}W',
-            progress: _recommendedPsu == 0
+                : '~${_estimatedPower}W tải • ≥${_recommendedPsu}W nguồn',
+            progress: selectedIds.isEmpty || _recommendedPsu == 0
                 ? 0
                 : (_estimatedPower / _recommendedPsu)
                       .clamp(0.0, 1.0)
                       .toDouble(),
             amber: true,
           ),
+          if (checkingCompatibility)
+            const CardBox(
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 10),
+                  Text('Đang kiểm tra tương thích…'),
+                ],
+              ),
+            ),
+          if (liveCompatibility != null)
+            _LiveCompatibilitySummary(
+              report: liveCompatibility!,
+              onDetails: _openCompatibilityDetails,
+            ),
+          PCAssemblyPreview(installedTypes: selectedIds.keys.toSet()),
           ...selected.entries.map(
             (item) => ComponentRow(
               type: item.key,
               name: item.value,
-              price: (prices[item.key] ?? 0) == 0
+              price: missingPriceTypes.contains(item.key)
+                  ? 'Thiếu giá SQL'
+                  : (prices[item.key] ?? 0) == 0
                   ? '–'
+                  : estimatePriceTypes.contains(item.key)
+                  ? '~${prices[item.key]!.toStringAsFixed(2).replaceAll('.', ',')}tr'
                   : '${prices[item.key]!.toStringAsFixed(2).replaceAll('.', ',')}tr',
               onTap: () => _choose(item.key),
               onDelete: item.value.startsWith('Chọn')
@@ -1591,9 +1908,11 @@ class _BuildTabState extends State<BuildTab> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Tag(
-                selected.values.any((value) => value.startsWith('Chọn'))
-                    ? '⚠ CHƯA ĐỦ LINH KIỆN'
-                    : '✓ TƯƠNG THÍCH',
+                selectedIds.length < 2
+                    ? '⚠ CHỌN THÊM LINH KIỆN'
+                    : isComplete
+                    ? '✓ ĐỦ 8 LINH KIỆN'
+                    : '✓ CÓ THỂ KIỂM TRA',
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -1606,6 +1925,15 @@ class _BuildTabState extends State<BuildTab> {
                     _total(),
                     style: const TextStyle(color: mint, fontSize: 21),
                   ),
+                  if (missingPriceTypes.isNotEmpty ||
+                      estimatePriceTypes.isNotEmpty)
+                    Text(
+                      missingPriceTypes.isNotEmpty
+                          ? '${missingPriceTypes.length} món chưa có giá; tổng chưa hoàn chỉnh.'
+                          : '* Giá ước tính, chưa phải giá thị trường.',
+                      textAlign: TextAlign.end,
+                      style: const TextStyle(color: Colors.orange, fontSize: 9),
+                    ),
                 ],
               ),
             ],
@@ -1614,10 +1942,10 @@ class _BuildTabState extends State<BuildTab> {
           SecondaryButton(
             text: 'Kiểm tra tương thích',
             onPressed: () async {
-              if (!isComplete) {
+              if (!canCheckCompatibility) {
                 showDemoMessage(
                   context,
-                  'Chưa thể kiểm tra: cấu hình còn thiếu linh kiện.',
+                  'Cần chọn ít nhất hai linh kiện để kiểm tra.',
                 );
                 return;
               }
@@ -1653,6 +1981,195 @@ class _BuildTabState extends State<BuildTab> {
   );
 }
 
+class PCAssemblyPreview extends StatefulWidget {
+  const PCAssemblyPreview({super.key, required this.installedTypes});
+
+  final Set<String> installedTypes;
+
+  @override
+  State<PCAssemblyPreview> createState() => _PCAssemblyPreviewState();
+}
+
+class _PCAssemblyPreviewState extends State<PCAssemblyPreview> {
+  double rotation = 0;
+
+  @override
+  Widget build(BuildContext context) => CardBox(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'MÔ HÌNH LẮP RÁP 3D',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Kéo ngang để xoay • linh kiện sáng lên khi được thêm.',
+          style: TextStyle(color: muted, fontSize: 11),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 170,
+          width: double.infinity,
+          child: GestureDetector(
+            onHorizontalDragUpdate: (details) => setState(() {
+              rotation = (rotation + details.delta.dx * .012) % (2 * math.pi);
+            }),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(
+                begin: 0,
+                end: widget.installedTypes.length / 8,
+              ),
+              duration: const Duration(milliseconds: 650),
+              curve: Curves.easeOutCubic,
+              builder: (context, progress, _) => CustomPaint(
+                painter: _PcAssemblyPainter(
+                  widget.installedTypes,
+                  progress,
+                  rotation,
+                ),
+                child: const SizedBox.expand(),
+              ),
+            ),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Text(
+            '${widget.installedTypes.length}/8 đã lắp',
+            style: const TextStyle(color: mint, fontSize: 11),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _PcAssemblyPainter extends CustomPainter {
+  const _PcAssemblyPainter(this.installedTypes, this.progress, this.rotation);
+
+  final Set<String> installedTypes;
+  final double progress;
+  final double rotation;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.scale(size.width / 300, size.height / 180);
+    canvas.translate(150, 90);
+    canvas.scale(math.cos(rotation).abs().clamp(.28, 1.0), 1);
+    canvas.translate(-150, -90);
+    final edge = Paint()
+      ..color = stroke
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    final caseFill = Paint()..color = panel2;
+    final side = Path()
+      ..moveTo(63, 32)
+      ..lineTo(202, 32)
+      ..lineTo(241, 54)
+      ..lineTo(241, 151)
+      ..lineTo(102, 151)
+      ..lineTo(63, 130)
+      ..close();
+    canvas.drawPath(side, caseFill);
+    canvas.drawPath(side, edge);
+    final front = Path()
+      ..moveTo(63, 32)
+      ..lineTo(102, 54)
+      ..lineTo(102, 151)
+      ..lineTo(63, 130)
+      ..close();
+    canvas.drawPath(front, Paint()..color = const Color(0xff202b37));
+    canvas.drawPath(front, edge);
+    final board = Path()
+      ..moveTo(111, 60)
+      ..lineTo(195, 60)
+      ..lineTo(224, 76)
+      ..lineTo(140, 76)
+      ..close();
+    _part(canvas, board, 'MAINBOARD', const Color(0xff2b8e75));
+    final cpu = Path()
+      ..moveTo(129, 64)
+      ..lineTo(149, 64)
+      ..lineTo(158, 69)
+      ..lineTo(138, 69)
+      ..close();
+    _part(canvas, cpu, 'CPU', const Color(0xffd6913d));
+    final ram = Path()
+      ..moveTo(163, 61)
+      ..lineTo(168, 61)
+      ..lineTo(178, 67)
+      ..lineTo(173, 67)
+      ..close();
+    _part(canvas, ram, 'RAM', const Color(0xff7694cb));
+    final gpu = Path()
+      ..moveTo(127, 91)
+      ..lineTo(207, 91)
+      ..lineTo(222, 100)
+      ..lineTo(142, 100)
+      ..close();
+    _part(canvas, gpu, 'GPU', const Color(0xff55a8e2));
+    final storage = Path()
+      ..moveTo(111, 111)
+      ..lineTo(143, 111)
+      ..lineTo(154, 117)
+      ..lineTo(122, 117)
+      ..close();
+    _part(canvas, storage, 'SSD', const Color(0xffa77ce0));
+    final psu = Path()
+      ..moveTo(113, 130)
+      ..lineTo(165, 130)
+      ..lineTo(178, 137)
+      ..lineTo(126, 137)
+      ..close();
+    _part(canvas, psu, 'PSU', const Color(0xffd4a943));
+    final fan = Paint()
+      ..color = installedTypes.contains('CASE') ? mint : stroke
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawCircle(const Offset(82, 77), 10, fan);
+    canvas.drawCircle(const Offset(82, 107), 10, fan);
+    final cooler = Paint()
+      ..color = installedTypes.contains('TẢN NHIỆT') ? mint : stroke
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawCircle(const Offset(147, 57), 13, cooler);
+    final label = TextPainter(
+      text: TextSpan(
+        text: '${(progress * 100).round()}%',
+        style: const TextStyle(
+          color: mint,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    label.paint(canvas, const Offset(250, 32));
+    canvas.restore();
+  }
+
+  void _part(Canvas canvas, Path path, String type, Color color) {
+    final installed = installedTypes.contains(type);
+    final fill = installed
+        ? Color.lerp(panel, color, .45 + .55 * progress.clamp(0.0, 1.0))!
+        : panel.withValues(alpha: .85);
+    canvas.drawPath(path, Paint()..color = fill);
+    final outline = Paint()
+      ..color = installed ? mint : stroke
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    canvas.drawPath(path, outline);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PcAssemblyPainter oldDelegate) =>
+      oldDelegate.progress != progress ||
+      oldDelegate.rotation != rotation ||
+      !setEquals(oldDelegate.installedTypes, installedTypes);
+}
+
 class MarketChangesScreen extends StatelessWidget {
   const MarketChangesScreen({
     super.key,
@@ -1665,7 +2182,7 @@ class MarketChangesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final changed = items
-        .where((item) => ((item['trend'] as num?)?.toDouble() ?? 0) != 0)
+        .where((item) => (parseApiNumber(item['trend']) ?? 0) != 0)
         .toList();
     return Shell(
       title: 'Biến động giá',
@@ -1688,9 +2205,9 @@ class MarketChangesScreen extends StatelessWidget {
                   'Giá trước: ${_money(item['previousPrice'])}\nGiá hiện tại: ${_money(item['price'])}',
                 ),
                 trailing: Text(
-                  '${(item['trend'] as num?)?.toStringAsFixed(2)}%',
+                  '${(parseApiNumber(item['trend']) ?? 0).toStringAsFixed(2)}%',
                   style: TextStyle(
-                    color: (item['trend'] as num? ?? 0) < 0
+                    color: (parseApiNumber(item['trend']) ?? 0) < 0
                         ? mint
                         : Colors.orange,
                     fontWeight: FontWeight.bold,
@@ -1705,11 +2222,12 @@ class MarketChangesScreen extends StatelessWidget {
   }
 
   static String _money(dynamic value) =>
-      '${((value as num?)?.toDouble() ?? 0).toStringAsFixed(0)}đ';
+      '${(parseApiNumber(value) ?? 0).toStringAsFixed(0)}đ';
 }
 
 class CompareProductsScreen extends StatefulWidget {
-  const CompareProductsScreen({super.key});
+  const CompareProductsScreen({super.key, this.initialProductIds = const []});
+  final List<String> initialProductIds;
   @override
   State<CompareProductsScreen> createState() => _CompareProductsScreenState();
 }
@@ -1718,21 +2236,28 @@ class _CompareProductsScreenState extends State<CompareProductsScreen> {
   late Future<List<Map<String, dynamic>>> productsFuture;
   final selected = <String>{};
   Map<String, dynamic>? result;
+  String query = '';
+  String typeFilter = 'Tất cả';
+  Timer? _searchDebounce;
+  String get areaId =>
+      ApiClient.instance.currentUser?['areaId']?.toString() ?? 'hcm';
 
   @override
   void initState() {
     super.initState();
+    selected.addAll(widget.initialProductIds.take(3));
     productsFuture = ApiClient.instance.products('');
   }
 
   Future<void> _compare() async {
-    if (selected.length != 2) {
-      showMessage(context, 'Hãy chọn đúng 2 linh kiện để so giá.');
+    if (selected.length < 2 || selected.length > 3) {
+      showMessage(context, 'Hãy chọn từ 2 đến 3 linh kiện để so sánh.');
       return;
     }
     try {
       final response = await ApiClient.instance.compareProducts(
         selected.toList(),
+        areaId: areaId,
       );
       if (mounted) setState(() => result = response);
     } catch (error) {
@@ -1740,11 +2265,41 @@ class _CompareProductsScreenState extends State<CompareProductsScreen> {
     }
   }
 
+  void _compareFromButton() {
+    if (selected.length < 2 || selected.length > 3) {
+      showMessage(context, 'Chọn thêm ít nhất một linh kiện để so sánh.');
+      return;
+    }
+    _compare();
+  }
+
+  void _setQuery(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+      if (mounted) setState(() => query = value.trim().toLowerCase());
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'So giá linh kiện',
-    subtitle: 'Chọn một cặp linh kiện bất kỳ',
+    subtitle: 'Chọn từ 2 đến 3 linh kiện • SQL $areaId',
     back: true,
+    bottomNavigationBar: SafeArea(
+      minimum: const EdgeInsets.fromLTRB(18, 8, 18, 12),
+      child: PrimaryButton(
+        text: result == null
+            ? 'So sánh giá (${selected.length}/2–3)'
+            : 'Cập nhật so sánh (${selected.length})',
+        onPressed: _compareFromButton,
+      ),
+    ),
     child: FutureBuilder<List<Map<String, dynamic>>>(
       future: productsFuture,
       builder: (context, snapshot) {
@@ -1752,42 +2307,107 @@ class _CompareProductsScreenState extends State<CompareProductsScreen> {
           return const Center(child: CircularProgressIndicator(color: mint));
         }
         final products = snapshot.data!;
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
-          children: [
-            const InfoTile(
-              icon: Icons.compare_arrows,
-              text: 'Không giới hạn loại linh kiện: CPU, GPU, RAM, SSD, nguồn và các loại khác.',
-            ),
-            const SizedBox(height: 12),
-            ...products.map(
-              (item) => CheckboxListTile(
-                value: selected.contains(item['id']),
-                onChanged: (checked) {
-                  setState(() {
-                    if (checked == true && selected.length < 2) {
-                      selected.add(item['id'].toString());
-                    } else if (checked != true) {
-                      selected.remove(item['id']);
-                    }
-                  });
-                },
-                title: Text(item['name'].toString()),
-                subtitle: Text('${item['type']} • ${item['price']}đ'),
+        final visible = products.where((item) {
+          final type = item['type']?.toString() ?? '';
+          final name = item['name']?.toString().toLowerCase() ?? '';
+          return (typeFilter == 'Tất cả' || type == typeFilter) &&
+              matchesCatalogSearch(name, query);
+        }).toList();
+        final types =
+            products.map((item) => item['type'].toString()).toSet().toList()
+              ..sort();
+        types.insert(0, 'Tất cả');
+        return CustomScrollView(
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 8),
+              sliver: SliverList(
+                delegate: SliverChildListDelegate([
+                  const InfoTile(
+                    icon: Icons.compare_arrows,
+                    text: 'So sánh giá hiện tại, thông số và lịch sử. Giá ước tính được đánh dấu; chỉ giá khu vực có lịch sử biến động.',
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    onChanged: _setQuery,
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.search),
+                      hintText: 'Tìm tên linh kiện',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    initialValue: typeFilter,
+                    decoration: const InputDecoration(
+                      labelText: 'Loại linh kiện',
+                    ),
+                    items: types
+                        .map(
+                          (type) =>
+                              DropdownMenuItem(value: type, child: Text(type)),
+                        )
+                        .toList(),
+                    onChanged: (value) =>
+                        setState(() => typeFilter = value ?? 'Tất cả'),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${visible.length} / ${products.length} linh kiện từ SQL',
+                  ),
+                  if (result != null) ...[
+                    const SizedBox(height: 12),
+                    const Text(
+                      'SO SÁNH GIÁ',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    ...((result!['products'] as List? ?? const []).map(
+                      (item) => ComparedProductCard(
+                        product: Map<String, dynamic>.from(item as Map),
+                        areaId: areaId,
+                      ),
+                    )),
+                  ],
+                ]),
               ),
             ),
-            PrimaryButton(text: 'So giá 2 linh kiện', onPressed: _compare),
-            if (result != null) ...[
-              const SizedBox(height: 14),
-              ...((result!['products'] as List? ?? const []).map(
-                (item) => CardBox(
-                  child: Text(
-                    '${item['name']}\n${item['type']} • ${item['price']}đ',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-              )),
-            ],
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate((context, index) {
+                  final item = visible[index];
+                  final id = item['id'].toString();
+                  final price = parseApiNumber(item['price']) ?? 0;
+                  final hasPrice = price > 0;
+                  final isEstimate = item['priceSource'] == 'catalog_estimate';
+                  return CheckboxListTile(
+                    value: selected.contains(id),
+                    onChanged: !hasPrice
+                        ? null
+                        : (checked) {
+                            setState(() {
+                              result = null;
+                              if (checked == true && selected.length < 3) {
+                                selected.add(id);
+                              } else if (checked != true) {
+                                selected.remove(id);
+                              }
+                            });
+                          },
+                    title: Text(item['name'].toString()),
+                    subtitle: Text(
+                      '${item['type']} • ${!hasPrice ? 'Chưa có giá SQL' : '${isEstimate ? '≈ ' : ''}${formatVnd(price)}${isEstimate ? ' · ước tính' : ''}'}',
+                    ),
+                  );
+                }, childCount: visible.length),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
+              sliver: SliverList(
+                delegate: SliverChildListDelegate([const SizedBox(height: 8)]),
+              ),
+            ),
           ],
         );
       },
@@ -1795,14 +2415,285 @@ class _CompareProductsScreenState extends State<CompareProductsScreen> {
   );
 }
 
+class ComparedProductCard extends StatefulWidget {
+  const ComparedProductCard({
+    super.key,
+    required this.product,
+    required this.areaId,
+  });
+  final Map<String, dynamic> product;
+  final String areaId;
+
+  @override
+  State<ComparedProductCard> createState() => _ComparedProductCardState();
+}
+
+class _ComparedProductCardState extends State<ComparedProductCard> {
+  String period = 'day';
+  late Future<Map<String, dynamic>> history;
+
+  @override
+  void initState() {
+    super.initState();
+    history = _loadHistory();
+  }
+
+  Future<Map<String, dynamic>> _loadHistory() =>
+      ApiClient.instance.priceHistory(
+        widget.product['id'].toString(),
+        areaId: widget.areaId,
+        period: period,
+      );
+
+  void _setPeriod(String value) {
+    setState(() {
+      period = value;
+      history = _loadHistory();
+    });
+  }
+
+  Future<void> _setPriceAlert() async {
+    final controller = TextEditingController(
+      text: (parseApiNumber(widget.product['price']) ?? 0).round().toString(),
+    );
+    final targetPrice = await showDialog<int>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Theo dõi giá linh kiện'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            labelText: 'Thông báo khi giá xuống dưới (VNĐ)',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              int.tryParse(controller.text.replaceAll(RegExp(r'[^0-9]'), '')),
+            ),
+            child: const Text('Lưu cảnh báo'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (targetPrice == null || targetPrice <= 0) return;
+    try {
+      await ApiClient.instance.createPriceAlert(
+        productId: widget.product['id'].toString(),
+        targetPrice: targetPrice,
+        areaId: widget.areaId,
+      );
+      if (mounted) showDemoMessage(context, 'Đã lưu cảnh báo giá trên SQL.');
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không lưu được cảnh báo: $error');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isMarketPrice = widget.product['priceSource'] == 'market';
+    return CardBox(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.product['name'].toString(),
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(
+            '${widget.product['type']} • ${isMarketPrice ? 'Giá khu vực SQL ${widget.areaId}' : 'Giá ước tính trong catalog SQL'}',
+            style: TextStyle(
+              color: isMarketPrice ? muted : Colors.orange,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            formatVnd(widget.product['price']),
+            style: TextStyle(
+              color: isMarketPrice ? mint : Colors.orange,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              _specChip('Socket', widget.product['socket']),
+              _specChip('RAM', widget.product['ram']),
+              _specChip('Form', widget.product['form']),
+              _specChip(
+                'Điện',
+                widget.product['power'] == null
+                    ? widget.product['watts']
+                    : '${widget.product['power']}W',
+              ),
+              _specChip(
+                'Dài',
+                widget.product['length'] == null
+                    ? widget.product['gpuLength']
+                    : '${widget.product['length']}mm',
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: isMarketPrice ? _setPriceAlert : null,
+              icon: const Icon(Icons.notifications_active_outlined, size: 16),
+              label: Text(
+                isMarketPrice ? 'Theo dõi giá SQL' : 'Chưa có giá thị trường',
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'day', label: Text('Ngày')),
+              ButtonSegment(value: 'month', label: Text('Tháng')),
+              ButtonSegment(value: 'year', label: Text('Năm')),
+            ],
+            selected: {period},
+            onSelectionChanged: (value) => _setPeriod(value.first),
+            showSelectedIcon: false,
+          ),
+          const SizedBox(height: 8),
+          FutureBuilder<Map<String, dynamic>>(
+            future: history,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const SizedBox(
+                  height: 110,
+                  child: Center(child: CircularProgressIndicator(color: mint)),
+                );
+              }
+              if (snapshot.hasError) {
+                return Text(
+                  'Không tải được lịch sử giá: ${snapshot.error}',
+                  style: const TextStyle(color: Colors.amber, fontSize: 11),
+                );
+              }
+              final data = snapshot.data!;
+              final points = (data['history'] as List? ?? const [])
+                  .map((item) => Map<String, dynamic>.from(item as Map))
+                  .toList();
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    data['priceSource'] == 'market'
+                        ? 'Hiện tại ${formatVnd(data['price'])} • trước ${formatVnd(data['previousPrice'])} • ${parseApiNumber(data['changePercent'])?.toStringAsFixed(2) ?? '0.00'}%'
+                        : 'Giá ước tính ${formatVnd(data['price'])} • chưa có giá khu vực SQL.',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: data['priceSource'] == 'market'
+                          ? null
+                          : Colors.orange,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    height: 110,
+                    width: double.infinity,
+                    child: CustomPaint(painter: _PriceChartPainter(points)),
+                  ),
+                  Text(
+                    points.length < 2
+                        ? data['priceSource'] != 'market'
+                              ? 'Chưa có lịch sử giá thị trường để vẽ xu hướng.'
+                              : 'SQL có ${points.length} mốc giá; cần thêm lịch sử để vẽ xu hướng.'
+                        : '${points.length} mốc giá ${period == 'day'
+                              ? 'theo ngày'
+                              : period == 'month'
+                              ? 'theo tháng'
+                              : 'theo năm'}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _specChip(String label, dynamic value) {
+    if (value == null || value.toString().isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Chip(
+      label: Text('$label: $value', style: const TextStyle(fontSize: 10)),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+}
+
+class _PriceChartPainter extends CustomPainter {
+  const _PriceChartPainter(this.points);
+  final List<Map<String, dynamic>> points;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final grid = Paint()
+      ..color = stroke
+      ..strokeWidth = 1;
+    for (var line = 1; line <= 3; line++) {
+      final y = size.height * line / 4;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
+    }
+    final values = points
+        .map((point) => parseApiNumber(point['price']) ?? 0)
+        .toList();
+    if (values.isEmpty) return;
+    final minValue = values.reduce((a, b) => a < b ? a : b);
+    final maxValue = values.reduce((a, b) => a > b ? a : b);
+    final spread = (maxValue - minValue).abs();
+    final path = Path();
+    final linePaint = Paint()
+      ..color = mint
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5;
+    for (var index = 0; index < values.length; index++) {
+      final x = values.length == 1
+          ? size.width / 2
+          : size.width * index / (values.length - 1);
+      final normalized = spread == 0 ? .5 : (values[index] - minValue) / spread;
+      final y = size.height - 10 - normalized * (size.height - 20);
+      if (index == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+      canvas.drawCircle(Offset(x, y), 3.5, Paint()..color = mint);
+    }
+    canvas.drawPath(path, linePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PriceChartPainter oldDelegate) =>
+      oldDelegate.points != points;
+}
+
 class ProductListScreen extends StatefulWidget {
   const ProductListScreen({
     super.key,
     this.componentType = 'GPU',
+    this.areaId = 'hcm',
     this.onSelected,
   });
   final String componentType;
-  final void Function(String name, double price)? onSelected;
+  final String areaId;
+  final void Function(Product product)? onSelected;
   @override
   State<ProductListScreen> createState() => _ProductListScreenState();
 }
@@ -1811,6 +2702,7 @@ class _ProductListScreenState extends State<ProductListScreen> {
   late Future<List<Product>> productsFuture;
   String query = '';
   int? maxPrice;
+  Timer? _searchDebounce;
 
   @override
   void initState() {
@@ -1824,19 +2716,34 @@ class _ProductListScreenState extends State<ProductListScreen> {
         widget.componentType,
         query: query,
         maxPrice: maxPrice,
+        areaId: widget.areaId,
       );
       return data.map((item) {
         final name = item['name'] as String;
-        ApiClient.instance.productIdsByName[name] = item['id'] as String;
+        final price = parseApiNumber(item['price']);
+        final hasPrice = price != null && price > 0;
+        final priceEstimate = item['priceSource'] == 'catalog_estimate';
+        final id = item['id']?.toString() ?? '';
+        ApiClient.instance.productPriceSourceByName[name] =
+            item['priceSource']?.toString() ?? 'missing';
         ApiClient.instance.productPowerByName[name] =
-            (item['power'] as num?)?.toInt() ?? 0;
+            (parseApiNumber(item['power']) ?? 0).toInt();
+        ApiClient.instance.productRecommendedPsuByName[name] =
+            (parseApiNumber(item['recommendedPsuW']) ?? 0).toInt();
         return Product(
           name,
-          '${((item['price'] as num) / 1000000).toStringAsFixed(2).replaceAll('.', ',')}tr',
-          '${item['socket'] ?? item['ram'] ?? item['form'] ?? 'Giá khu vực'} · API',
+          hasPrice
+              ? '${(price / 1000000).toStringAsFixed(2).replaceAll('.', ',')}tr'
+              : 'Chưa có giá SQL',
+          '${item['socket'] ?? item['ram'] ?? item['form'] ?? 'Linh kiện'} · ${priceEstimate ? 'Giá ước tính' : 'Giá khu vực'}',
           item['type'] == 'GPU'
               ? 'assets/figma/gpu1.jpeg'
               : 'assets/figma/gpu2.png',
+          hasPrice: hasPrice,
+          priceEstimate: priceEstimate,
+          id: id,
+          powerW: (parseApiNumber(item['power']) ?? 0).toInt(),
+          priceSource: item['priceSource']?.toString() ?? 'missing',
         );
       }).toList();
     } catch (error) {
@@ -1852,92 +2759,122 @@ class _ProductListScreenState extends State<ProductListScreen> {
     });
   }
 
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _refreshProducts(nextQuery: value);
+    });
+  }
+
+  void _selectProduct(Product product) {
+    if (widget.onSelected != null) {
+      if (!product.hasPrice) {
+        showMessage(context, 'Chưa thể thêm sản phẩm này: chưa có giá SQL.');
+        return;
+      }
+      widget.onSelected!(product);
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CompatibilityScreen()),
+    );
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Chọn ${widget.componentType}',
     subtitle: 'Giá và sản phẩm lấy từ PCBUILD API',
     back: true,
     child: SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(18, 4, 18, 20),
-        children: [
-          TextField(
-            onChanged: (value) => _refreshProducts(nextQuery: value),
-            decoration: InputDecoration(
-              prefixIcon: Icon(Icons.search),
-              hintText: 'Tìm RTX 4060, RX 7600...',
-              suffixIcon: const Icon(Icons.search),
-            ),
-          ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 8,
-            children: [
-              ActionChip(
-                label: const Text('Tất cả'),
-                onPressed: () => _refreshProducts(nextMaxPrice: null),
+      child: FutureBuilder<List<Product>>(
+        future: productsFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator(color: mint));
+          }
+          if (snapshot.hasError) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'Chưa tải được sản phẩm. Hãy kiểm tra backend và thử lại.',
+                  style: TextStyle(color: Colors.amber),
+                ),
               ),
-              ActionChip(
-                label: const Text('≤ 10 triệu'),
-                onPressed: () => _refreshProducts(nextMaxPrice: 10000000),
+            );
+          }
+          final products = snapshot.data ?? const <Product>[];
+          return CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(18, 4, 18, 8),
+                sliver: SliverList(
+                  delegate: SliverChildListDelegate([
+                    TextField(
+                      onChanged: _onSearchChanged,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.search),
+                        hintText: 'Tìm RTX 4060, RX 7600...',
+                        suffixIcon: Icon(Icons.search),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        ActionChip(
+                          label: const Text('Tất cả'),
+                          onPressed: () => _refreshProducts(nextMaxPrice: null),
+                        ),
+                        ActionChip(
+                          label: const Text('≤ 10 triệu'),
+                          onPressed: () =>
+                              _refreshProducts(nextMaxPrice: 10000000),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    const InfoTile(
+                      text: 'Sản phẩm lấy từ SQL; giá ước tính được đánh dấu riêng.',
+                      trailing: 'SQL',
+                    ),
+                    const SizedBox(height: 8),
+                    if (products.isEmpty)
+                      const CardBox(child: Text('Không có sản phẩm phù hợp.')),
+                  ]),
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 20),
+                sliver: SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) => ProductCard(
+                      product: products[index],
+                      onTap: () => _selectProduct(products[index]),
+                    ),
+                    childCount: products.length,
+                  ),
+                ),
               ),
             ],
-          ),
-          const SizedBox(height: 14),
-          const InfoTile(
-            text: 'Giá hiện tại từ catalog khu vực',
-            trailing: 'API',
-          ),
-          const SizedBox(height: 8),
-          FutureBuilder<List<Product>>(
-            future: productsFuture,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const Padding(
-                  padding: EdgeInsets.all(28),
-                  child: Center(child: CircularProgressIndicator(color: mint)),
-                );
-              }
-              if (snapshot.hasError || snapshot.data!.isEmpty) {
-                return const CardBox(
-                  child: Text(
-                    'Chưa tải được sản phẩm. Hãy kiểm tra backend và thử lại.',
-                    style: TextStyle(color: Colors.amber),
-                  ),
-                );
-              }
-              return Column(
-                children: snapshot.data!
-                    .map(
-                      (p) => ProductCard(
-                        product: p,
-                        onTap: () {
-                          final price = productPriceInMillions(p.price);
-                          if (widget.onSelected != null) {
-                            widget.onSelected!(p.name, price);
-                          } else {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const CompatibilityScreen(),
-                              ),
-                            );
-                          }
-                        },
-                      ),
-                    )
-                    .toList(),
-              );
-            },
-          ),
-        ],
+          );
+        },
       ),
     ),
   );
 }
 
 class ScannerScreen extends StatefulWidget {
-  const ScannerScreen({super.key});
+  const ScannerScreen({super.key, this.initialAnalysis, this.onOpenBuild});
+  final String? initialAnalysis;
+  final VoidCallback? onOpenBuild;
   @override
   State<ScannerScreen> createState() => _ScannerScreenState();
 }
@@ -1947,6 +2884,31 @@ class _ScannerScreenState extends State<ScannerScreen> {
   XFile? selectedImage;
   String? analysis;
   bool analyzing = false;
+  bool loadingHistory = false;
+  List<Map<String, dynamic>> scanHistory = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    analysis = widget.initialAnalysis;
+    scanned = analysis != null;
+    _loadHistory();
+  }
+
+  Future<void> _loadHistory() async {
+    if (ApiClient.instance.token == null) return;
+    setState(() => loadingHistory = true);
+    try {
+      final result = await ApiClient.instance.scans();
+      if (mounted) setState(() => scanHistory = result);
+    } catch (error) {
+      if (mounted) {
+        showDemoMessage(context, 'Không tải được lịch sử quét: $error');
+      }
+    } finally {
+      if (mounted) setState(() => loadingHistory = false);
+    }
+  }
 
   Future<void> _pickAndAnalyze(ImageSource source) async {
     if (source == ImageSource.camera &&
@@ -1955,10 +2917,14 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
     final image = await ImagePicker().pickImage(
       source: source,
-      imageQuality: 85,
-      maxWidth: 1280,
+      imageQuality: 70,
+      maxWidth: 1024,
     );
     if (image == null || !mounted) return;
+    if (ApiClient.instance.token == null) {
+      showDemoMessage(context, 'Đăng nhập để lưu lịch sử quét vào tài khoản.');
+      return;
+    }
     setState(() {
       selectedImage = image;
       analysis = null;
@@ -1967,26 +2933,63 @@ class _ScannerScreenState extends State<ScannerScreen> {
     });
     try {
       final bytes = await image.readAsBytes();
-      final service = LMStudioService();
-      final models = await service.getModels();
-      if (models.isEmpty) {
-        throw const LMStudioException('Không tìm thấy model Vision.');
+      if (bytes.length > 4_000_000) {
+        throw ApiException(
+          'Ảnh còn quá lớn. Hãy chụp lại gần hơn hoặc chọn ảnh nhỏ hơn 4 MB.',
+        );
       }
-      final answer = await service.chat(
-        modelId: models.first,
-        prompt:
-            'Hãy nhận diện linh kiện PC trong ảnh bằng tiếng Việt. '
-            'Nêu tên, hãng, model nếu nhìn thấy và chỉ kết luận dựa trên ảnh.',
+      final scan = await ApiClient.instance.analyzeProductImage(
         imageBytes: bytes,
         imageMimeType: image.name.toLowerCase().endsWith('.png')
             ? 'image/png'
+            : image.name.toLowerCase().endsWith('.webp')
+            ? 'image/webp'
             : 'image/jpeg',
       );
+      final answer =
+          scan['analysis']?.toString() ?? 'AI chưa nhận diện được sản phẩm.';
+      final product = scan['product'] is Map
+          ? Map<String, dynamic>.from(scan['product'] as Map)
+          : null;
+      final candidateProducts = scan['candidateProducts'] is List
+          ? (scan['candidateProducts'] as List)
+                .whereType<Map>()
+                .map((item) => Map<String, dynamic>.from(item))
+                .toList()
+          : <Map<String, dynamic>>[];
+      Map<String, dynamic>? selectedProduct = product;
       if (mounted) {
         setState(() => analysis = answer);
+        await _loadHistory();
+        if (selectedProduct != null) {
+          await _offerGeneratedBuild(scan, selectedProduct);
+        } else if (candidateProducts.isNotEmpty) {
+          selectedProduct = await _chooseScanCandidate(candidateProducts);
+          if (selectedProduct != null) {
+            await _offerGeneratedBuild(scan, selectedProduct);
+          }
+        }
+        if (!mounted) return;
+        // Keep a clean scanner route underneath consultation, while history stays in SQL.
+        setState(() {
+          selectedImage = null;
+          analysis = null;
+          scanned = false;
+        });
         await Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => ChatTab(initialPrompt: answer)),
+          MaterialPageRoute(
+            builder: (_) => ChatTab(
+              initialPrompt: answer,
+              initialPinnedComponents: selectedProduct == null
+                  ? const {}
+                  : {
+                      selectedProduct['type']?.toString() ?? 'GPU':
+                          selectedProduct['id']?.toString() ?? '',
+                    },
+              onOpenBuild: widget.onOpenBuild,
+            ),
+          ),
         );
       }
     } catch (error) {
@@ -1996,12 +2999,284 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
+  Future<Map<String, dynamic>?> _chooseScanCandidate(
+    List<Map<String, dynamic>> candidates,
+  ) => showDialog<Map<String, dynamic>>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('AI tìm được sản phẩm gần giống'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Ảnh chưa đủ rõ để xác nhận SKU. Chọn một mẫu trong catalog SQL để xem cấu hình build tương tự:',
+              ),
+              const SizedBox(height: 8),
+              ...candidates.map(
+                (item) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(item['name']?.toString() ?? 'Sản phẩm SQL'),
+                  subtitle: Text(
+                    '${item['type'] ?? 'Linh kiện'} • ${formatVnd(parseApiNumber(item['price'])?.round() ?? 0)}',
+                  ),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: () => Navigator.pop(dialogContext, item),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Bỏ qua'),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> _offerGeneratedBuild(
+    Map<String, dynamic> scan,
+    Map<String, dynamic> product,
+  ) async {
+    final type = product['type']?.toString() ?? '';
+    final productId = product['id']?.toString() ?? '';
+    if (type.isEmpty || productId.isEmpty) return;
+    final areaId =
+        ApiClient.instance.currentUser?['areaId']?.toString() ?? 'hcm';
+    Map<String, dynamic> proposal;
+    try {
+      proposal = await ApiClient.instance.generateBuildSuggestion(
+        budget: 40000000,
+        purpose: 'Build PC có linh kiện ${product['name']}',
+        areaId: areaId,
+        pinnedComponents: {type: productId},
+      );
+    } catch (_) {
+      if (mounted) {
+        showDemoMessage(
+          context,
+          'Chưa tạo được cấu hình từ catalog SQL. Hãy kiểm tra kết nối rồi thử lại; chưa có build nào được lưu.',
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+    final components = proposal['components'] is Map
+        ? Map<String, dynamic>.from(proposal['components'] as Map)
+        : <String, dynamic>{type: productId};
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Tạo cấu hình từ sản phẩm quét?'),
+        content: Text(
+          'Đã nhận diện ${product['name']}. Tạo cấu hình nháp gồm ${components.length}/8 linh kiện và lưu vào tài khoản SQL?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Bỏ qua'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Lưu vào tài khoản'),
+          ),
+        ],
+      ),
+    );
+    if (save != true || !mounted) return;
+    final previousBuildId = ApiClient.instance.buildId;
+    String? createdBuildId;
+    try {
+      final created = await ApiClient.instance.createBuild(
+        name: proposal['name']?.toString() ?? 'Build nháp từ sản phẩm quét',
+        budget: (parseApiNumber(proposal['budget']) ?? 40000000).round(),
+        areaId: areaId,
+      );
+      final newBuildId = created['id']?.toString();
+      if (newBuildId == null) {
+        throw ApiException('SQL không trả mã cấu hình mới.');
+      }
+      createdBuildId = newBuildId;
+      ApiClient.instance.buildId = newBuildId;
+      for (final entry in components.entries) {
+        final componentId = entry.value?.toString() ?? '';
+        if (componentId.isNotEmpty) {
+          await ApiClient.instance.updateComponent(entry.key, componentId);
+        }
+      }
+      await ApiClient.instance.confirmScan(scan['id'].toString(), productId);
+      if (mounted) {
+        showDemoMessage(
+          context,
+          'Đã lưu build ${components.length}/8 linh kiện vào SQL.',
+        );
+      }
+      await _loadHistory();
+    } catch (error) {
+      if (createdBuildId != null) {
+        try {
+          await ApiClient.instance.deleteBuild(createdBuildId);
+        } catch (_) {}
+      }
+      if (mounted) {
+        showDemoMessage(context, 'Không lưu được build vào SQL: $error');
+      }
+    } finally {
+      ApiClient.instance.buildId = previousBuildId;
+    }
+  }
+
+  Future<void> _showScanHistory() => showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: panel,
+    builder: (sheetContext) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(18),
+        children: [
+          const Text(
+            'Lịch sử quét đã lưu',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          if (loadingHistory)
+            const Center(child: CircularProgressIndicator(color: mint))
+          else if (scanHistory.isEmpty)
+            const Text(
+              'Chưa có lịch sử trong tài khoản SQL.',
+              style: TextStyle(color: muted),
+            )
+          else
+            ...scanHistory.map(
+              (result) => CardBox(
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.qr_code_scanner, color: mint),
+                  title: Text(
+                    result['productName']?.toString() ?? 'Chưa nhận diện được',
+                  ),
+                  subtitle: Text(
+                    '${result['productType'] ?? result['status']} • ${result['createdAt'] ?? ''}\n${result['analysis'] ?? ''}',
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: IconButton(
+                    tooltip: 'Xóa lịch sử',
+                    onPressed: () => _deleteScan(result),
+                    icon: const Icon(
+                      Icons.delete_outline,
+                      color: Colors.redAccent,
+                    ),
+                  ),
+                  onTap: () => _showScanDetails(result),
+                ),
+              ),
+            ),
+        ],
+      ),
+    ),
+  );
+
+  Future<void> _showScanDetails(Map<String, dynamic> scan) async {
+    try {
+      final details = await ApiClient.instance.scanDetails(
+        scan['id'].toString(),
+      );
+      if (!mounted) return;
+      final imageData = details['imageData']?.toString();
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(
+            details['product']?['name']?.toString() ??
+                scan['productName']?.toString() ??
+                'Kết quả quét',
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (imageData != null && imageData.isNotEmpty)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.memory(
+                      base64Decode(imageData),
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                const SizedBox(height: 10),
+                SelectableText(
+                  details['analysis']?.toString() ??
+                      'Không có phân tích lưu trong SQL.',
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Thời gian: ${details['createdAt'] ?? ''}',
+                  style: const TextStyle(color: muted, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Đóng'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        showDemoMessage(context, 'Không mở được chi tiết lịch sử: $error');
+      }
+    }
+  }
+
+  Future<void> _deleteScan(Map<String, dynamic> scan) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Xóa lịch sử quét?'),
+        content: const Text(
+          'Ảnh và kết quả lưu trong tài khoản SQL sẽ bị xóa.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Xóa'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await ApiClient.instance.deleteScan(scan['id'].toString());
+      await _loadHistory();
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không xóa được lịch sử: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Nhận diện linh kiện',
     subtitle: 'Đưa sản phẩm hoặc hộp vào khung',
     back: true,
-    action: const Tag('Lịch sử'),
+    action: TextButton(
+      onPressed: _showScanHistory,
+      child: const Text('Lịch sử', style: TextStyle(color: mint)),
+    ),
     child: SafeArea(
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
@@ -2047,25 +3322,44 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   right: 0,
                   child: Center(
                     child: Tag(
-                      analyzing ? 'AI ĐANG PHÂN TÍCH' : 'SẴN SÀNG QUÉT',
+                      analyzing
+                          ? 'AI ĐANG PHÂN TÍCH'
+                          : analysis != null
+                          ? 'ĐÃ PHÂN TÍCH'
+                          : scanned
+                          ? 'ẢNH ĐÃ CHỌN'
+                          : 'SẴN SÀNG QUÉT',
                     ),
                   ),
                 ),
                 Positioned(
                   left: 14,
+                  right: 14,
                   bottom: 15,
                   child: Text(
-                    analysis != null
-                        ? analysis!
-                        : scanned
+                    analysis != null || scanned
                         ? 'SẴN SÀNG PHÂN TÍCH ẢNH'
                         : 'SẴN SÀNG QUÉT\nĐưa linh kiện vào khung',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
               ],
             ),
           ),
+          if (analysis != null) ...[
+            const SizedBox(height: 12),
+            CardBox(
+              child: SelectableText(
+                analysis!,
+                style: const TextStyle(fontSize: 13, height: 1.45),
+              ),
+            ),
+          ],
           const SizedBox(height: 18),
           Center(
             child: InkWell(
@@ -2107,9 +3401,111 @@ class _ScannerScreenState extends State<ScannerScreen> {
   );
 }
 
+class _LiveCompatibilitySummary extends StatelessWidget {
+  const _LiveCompatibilitySummary({
+    required this.report,
+    required this.onDetails,
+  });
+  final Map<String, dynamic> report;
+  final VoidCallback onDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = report['status']?.toString() ?? 'partial';
+    final issues = (report['issues'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+    final recommendations = (report['recommendations'] as List? ?? const [])
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+    final color = status == 'incompatible' || status == 'error'
+        ? Colors.redAccent
+        : status == 'warning'
+        ? Colors.amber
+        : mint;
+    return CardBox(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                status == 'compatible'
+                    ? Icons.check_circle
+                    : Icons.warning_amber,
+                color: color,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  report['message']?.toString() ??
+                      switch (status) {
+                        'compatible' => 'Các thông số đã có đều tương thích.',
+                        'incompatible' =>
+                          'Phát hiện linh kiện không tương thích.',
+                        'warning' => 'Cần xem cảnh báo của cấu hình.',
+                        'error' => 'Kiểm tra chưa hoàn tất.',
+                        _ =>
+                          'Đã kiểm tra một phần; còn thiếu thông số catalog.',
+                      },
+                  style: TextStyle(color: color, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          if (issues.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            ...issues
+                .take(2)
+                .map(
+                  (issue) => Padding(
+                    padding: const EdgeInsets.only(bottom: 5),
+                    child: Text(
+                      '• ${issue['message']}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+          ],
+          if (recommendations.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Đề xuất: ${recommendations.take(2).map((item) => '${item['name']} — ${item['recommendationReason'] ?? 'phù hợp hơn'}').join('; ')}',
+              style: const TextStyle(color: mint, fontSize: 11),
+            ),
+          ],
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: onDetails,
+              icon: const Icon(Icons.article_outlined, size: 17),
+              label: const Text('Xem báo cáo đầy đủ'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class CompatibilityScreen extends StatelessWidget {
   const CompatibilityScreen({super.key, this.report});
   final Map<String, dynamic>? report;
+
+  String _criterionTitle(String code) =>
+      const {
+        'SOCKET': 'Socket CPU / mainboard',
+        'RAM': 'Chuẩn bộ nhớ RAM',
+        'PSU': 'Công suất bộ nguồn',
+        'CASE_SIZE': 'Chiều dài card đồ họa',
+        'COOLER_SOCKET': 'Socket tản nhiệt',
+        'CASE_FORM': 'Kích thước mainboard / case',
+      }[code] ??
+      code;
+
+  String _issueTitle(String code) => _criterionTitle(code);
 
   Future<void> _replace(BuildContext context, Map<String, dynamic> item) async {
     try {
@@ -2137,8 +3533,43 @@ class CompatibilityScreen extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
         children: [
-          ScoreCard(score: report?['score'] as int?),
+          ScoreCard(
+            score: parseApiNumber(report?['score'])?.round(),
+            verdict: report?['status']?.toString(),
+            selectedCount: parseApiNumber(report?['selectedCount'])?.round(),
+            checkedCount: report?['criteria'] is List
+                ? (report!['criteria'] as List)
+                      .where(
+                        (item) => item is Map && item['status'] != 'unchecked',
+                      )
+                      .length
+                : null,
+          ),
           const SizedBox(height: 14),
+          if (report?['powerAssessment'] is Map)
+            PowerAssessmentCard(
+              assessment: Map<String, dynamic>.from(
+                report!['powerAssessment'] as Map,
+              ),
+            ),
+          if (report?['powerAssessment'] is Map) const SizedBox(height: 12),
+          if (report != null)
+            InfoTile(
+              icon: report!['status'] == 'incompatible'
+                  ? Icons.error_outline
+                  : report!['status'] == 'partial'
+                  ? Icons.info_outline
+                  : Icons.check_circle_outline,
+              text: switch (report!['status']) {
+                'incompatible' =>
+                  'Không tương thích • ${report!['selectedCount'] ?? 0} linh kiện đã kiểm tra.',
+                'warning' =>
+                  'Có cảnh báo • ${report!['selectedCount'] ?? 0} linh kiện đã kiểm tra.',
+                'partial' => 'Đã kiểm tra các cặp có đủ dữ liệu; tiêu chí còn lại thiếu thông số trong SQL.',
+                _ => 'Tương thích trong phạm vi các thông số SQL hiện có.',
+              },
+            ),
+          if (report != null) const SizedBox(height: 10),
           if (report == null)
             const WarningRow(
               icon: Icons.info_outline,
@@ -2155,20 +3586,17 @@ class CompatibilityScreen extends StatelessWidget {
                 color: issue['severity'] == 'error'
                     ? Colors.redAccent
                     : Colors.amber,
-                title: issue['code'].toString(),
+                title: _issueTitle(issue['code'].toString()),
                 text: issue['message'].toString(),
               ),
             ),
           if (report?['criteria'] is List)
             ...((report!['criteria'] as List).map(
-              (criterion) => InfoTile(
-                icon: criterion['status'] == 'pass'
-                    ? Icons.check_circle_outline
-                    : criterion['status'] == 'unchecked'
-                    ? Icons.help_outline
-                    : Icons.warning_amber_outlined,
-                text:
-                    '${criterion['code']}: ${criterion['status']} • ${criterion['remediation']}',
+              (criterion) => CompatibilityCriterionCard(
+                title: _criterionTitle(criterion['code'].toString()),
+                status: criterion['status']?.toString() ?? 'unchecked',
+                detail: criterion['detail']?.toString() ?? '',
+                remediation: criterion['remediation']?.toString() ?? '',
               ),
             )),
           const SizedBox(height: 14),
@@ -2210,16 +3638,28 @@ class CompatibilityScreen extends StatelessWidget {
 }
 
 class ChatTab extends StatefulWidget {
-  const ChatTab({super.key, this.initialPrompt});
+  const ChatTab({
+    super.key,
+    this.initialPrompt,
+    this.initialPinnedComponents = const {},
+    this.responseTimeout = const Duration(minutes: 11),
+    this.onOpenBuild,
+  });
   final String? initialPrompt;
+  final Map<String, String> initialPinnedComponents;
+  final Duration responseTimeout;
+  final VoidCallback? onOpenBuild;
   @override
   State<ChatTab> createState() => _ChatTabState();
 }
 
 class _ChatTabState extends State<ChatTab> {
   final question = TextEditingController();
-  String? conversationId;
   final messages = <Map<String, String>>[];
+  String? conversationId;
+  late Future<void> conversationReady;
+  bool sending = false;
+  String? sendError;
 
   @override
   void initState() {
@@ -2227,17 +3667,45 @@ class _ChatTabState extends State<ChatTab> {
     if (widget.initialPrompt != null && widget.initialPrompt!.isNotEmpty) {
       messages.add({'role': 'assistant', 'text': widget.initialPrompt!});
     }
-    _startConversation();
+    conversationReady = _startConversation();
   }
 
   Future<void> _startConversation() async {
     if (ApiClient.instance.token == null) return;
     try {
-      final conversation = await ApiClient.instance.createConversation();
+      final conversation = await ApiClient.instance.createConversation(
+        initialMessage: widget.initialPrompt,
+      );
       if (mounted) {
-        setState(() => conversationId = conversation['id'] as String);
+        setState(() => conversationId = conversation['id'] as String?);
       }
-    } catch (_) {}
+    } catch (_) {
+      // Sending still works through the stateless AI endpoint if SQL history
+      // cannot be created for this conversation.
+    }
+  }
+
+  Future<void> _clearConversation() async {
+    await conversationReady;
+    final currentConversationId = conversationId;
+    if (currentConversationId != null) {
+      try {
+        await ApiClient.instance.deleteConversation(currentConversationId);
+      } catch (error) {
+        if (mounted) {
+          setState(() => sendError = 'Không thể xóa cuộc trò chuyện: $error');
+        }
+        return;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      conversationId = null;
+      messages.clear();
+      sendError = null;
+    });
+    conversationReady = _startConversation();
+    await conversationReady;
   }
 
   @override
@@ -2251,10 +3719,7 @@ class _ChatTabState extends State<ChatTab> {
     title: 'BuildMate AI',
     subtitle: '● Trực tuyến • hiểu giá địa phương',
     action: TextButton(
-      onPressed: () {
-        if (!mounted) return;
-        setState(() => messages.clear());
-      },
+      onPressed: sending ? null : _clearConversation,
       child: const Text('Xóa', style: TextStyle(color: mint)),
     ),
     child: SafeArea(
@@ -2275,15 +3740,21 @@ class _ChatTabState extends State<ChatTab> {
                   children: [
                     _SuggestionChip(
                       text: 'GPU dưới 10 triệu',
-                      onTap: () => _useSuggestion('GPU dưới 10 triệu'),
+                      onTap: sending
+                          ? null
+                          : () => _useSuggestion('GPU dưới 10 triệu'),
                     ),
                     _SuggestionChip(
                       text: 'Build gaming 20 triệu',
-                      onTap: () => _useSuggestion('Build gaming 20 triệu'),
+                      onTap: sending
+                          ? null
+                          : () => _useSuggestion('Build gaming 20 triệu'),
                     ),
                     _SuggestionChip(
                       text: 'So sánh hàng cũ/mới',
-                      onTap: () => _useSuggestion('So sánh hàng cũ/mới'),
+                      onTap: sending
+                          ? null
+                          : () => _useSuggestion('So sánh hàng cũ/mới'),
                     ),
                   ],
                 ),
@@ -2293,6 +3764,39 @@ class _ChatTabState extends State<ChatTab> {
                     dark: message['role'] == 'assistant',
                   ),
                 ),
+                if (sending)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 10),
+                        Text('Đang chờ BuildMate trả lời…'),
+                      ],
+                    ),
+                  ),
+                if (sendError != null)
+                  CardBox(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            sendError!,
+                            style: const TextStyle(color: Colors.amber),
+                          ),
+                        ),
+                        TextButton.icon(
+                          onPressed: sending ? null : _retryLastMessage,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Thử lại'),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
@@ -2300,11 +3804,12 @@ class _ChatTabState extends State<ChatTab> {
             padding: const EdgeInsets.fromLTRB(18, 6, 18, 10),
             child: TextField(
               controller: question,
+              enabled: !sending,
               onSubmitted: (_) => _send(context),
               decoration: InputDecoration(
                 hintText: 'Hỏi về linh kiện, giá, tương thích...',
                 suffixIcon: IconButton(
-                  onPressed: () => _send(context),
+                  onPressed: sending ? null : () => _send(context),
                   icon: Container(
                     padding: const EdgeInsets.all(7),
                     decoration: BoxDecoration(
@@ -2323,32 +3828,470 @@ class _ChatTabState extends State<ChatTab> {
   );
 
   Future<void> _send(BuildContext context) async {
+    if (sending) return;
     final text = question.text.trim();
     if (text.isEmpty) {
       showDemoMessage(context, 'Hãy nhập câu hỏi trước khi gửi.');
       return;
     }
     question.clear();
-    setState(() => messages.add({'role': 'user', 'text': text}));
+    setState(() {
+      messages.add({'role': 'user', 'text': text});
+      sendError = null;
+      sending = true;
+    });
+    await _processRequest(text);
+  }
+
+  Future<void> _retryLastMessage() async {
+    if (sending || messages.isEmpty || messages.last['role'] != 'user') return;
+    setState(() {
+      sendError = null;
+      sending = true;
+    });
+    await _processRequest(messages.last['text']!);
+  }
+
+  Future<void> _processRequest(String text) async {
+    if (_isBuildRequest(text)) {
+      try {
+        await _createBuildFromChat(text);
+      } catch (error) {
+        if (mounted) {
+          setState(() => sendError = 'Không tạo được build từ SQL: $error');
+        }
+      } finally {
+        if (mounted) setState(() => sending = false);
+      }
+      return;
+    }
+    await _requestAnswer(text);
+  }
+
+  Future<void> _requestAnswer(String text) async {
     try {
-      final answer = await ApiClient.instance.sendLmStudioMessage(
-        text,
-        history: messages
-            .take(messages.length - 1)
-            .map(
-              (message) => {
-                'role': message['role']!,
-                'content': message['text']!,
-              },
-            )
-            .toList(),
-      );
+      if (ApiClient.instance.token != null) {
+        await conversationReady;
+        if (conversationId == null) {
+          conversationReady = _startConversation();
+          await conversationReady;
+        }
+        if (conversationId == null) {
+          throw ApiException(
+            'Không tạo được hội thoại trong SQL. Kiểm tra kết nối rồi thử lại.',
+          );
+        }
+      }
+      final String answer;
+      if (conversationId != null) {
+        final response = await ApiClient.instance.sendMessage(
+          conversationId!,
+          text,
+        );
+        final choices = response['choices'];
+        final firstChoice = choices is List && choices.isNotEmpty
+            ? choices.first
+            : null;
+        final message = firstChoice is Map ? firstChoice['message'] : null;
+        final content = message is Map ? message['content'] : null;
+        if (content is! String || content.trim().isEmpty) {
+          throw ApiException('BuildMate không trả về nội dung hợp lệ.');
+        }
+        answer = content;
+      } else {
+        answer = await ApiClient.instance.sendLmStudioMessage(
+          text,
+          history: messages
+              .take(messages.length - 1)
+              .map(
+                (message) => {
+                  'role': message['role']!,
+                  'content': message['text']!,
+                },
+              )
+              .toList(),
+          timeout: widget.responseTimeout,
+        );
+      }
       if (mounted) {
         setState(() => messages.add({'role': 'assistant', 'text': answer}));
       }
+      if (_isBuildRequest(text) && mounted) {
+        try {
+          await _createBuildFromChat(text);
+        } catch (error) {
+          if (mounted) {
+            showDemoMessage(context, 'Chưa tạo được cấu hình: $error');
+          }
+        }
+      }
     } catch (error) {
-      if (mounted) showDemoMessage(context, 'Không gửi được tin nhắn: $error');
+      if (mounted) {
+        setState(() => sendError = 'Không nhận được phản hồi: $error');
+      }
+    } finally {
+      if (mounted) setState(() => sending = false);
     }
+  }
+
+  bool _isBuildRequest(String text) {
+    final normalized = text.toLowerCase();
+    final explicitBuildPhrases = <String>[
+      'build pc gaming',
+      'build gaming',
+      'build game',
+      'build theo',
+      'build với',
+      'build voi',
+      'build từ',
+      'build tu',
+      'build dựa',
+      'build dua',
+      'build cho',
+      'build giúp',
+      'build giup',
+      'build cấu hình',
+      'build cau hinh',
+      'build một bộ',
+      'build mot bo',
+      'build bộ pc',
+      'build bo pc',
+      'build dàn pc',
+      'build dan pc',
+      'build máy',
+      'build may',
+      'tạo build',
+      'tao build',
+      'lên cấu hình',
+      'len cau hinh',
+      'tạo cấu hình',
+      'tao cau hinh',
+      'dựng pc',
+      'dung pc',
+      'dựng cấu hình',
+      'dung cau hinh',
+      'lắp pc',
+      'lap pc',
+      'lắp ráp pc',
+      'lap rap pc',
+      'làm cấu hình',
+      'lam cau hinh',
+      'tạo bộ pc',
+      'tao bo pc',
+      'tạo dàn pc',
+      'tao dan pc',
+      'cho tôi build',
+      'cho toi build',
+      'giúp tôi build',
+      'giup toi build',
+      'muốn build',
+      'muon build',
+      'cần build',
+      'can build',
+    ];
+    if (explicitBuildPhrases.any(normalized.contains)) return true;
+    final compactBuildCommand = RegExp(
+      r'^\s*(?:(?:hãy|hay)\s+)?build\s+(?:(?:pc|máy tính|may tinh)\s+)?(?:rtx\s*)?\d{3,4}\b',
+    );
+    return compactBuildCommand.hasMatch(normalized) ||
+        RegExp(r'^\s*build\s+(?:nó|no|card này|card nay|cấu hình|cau hinh)\b')
+            .hasMatch(normalized);
+  }
+
+  Future<void> _createBuildFromChat(String prompt) async {
+    if (!mounted) return;
+    final areaId =
+        ApiClient.instance.currentUser?['areaId']?.toString() ?? 'hcm';
+    final contextText = messages
+        .map((message) => message['text'] ?? '')
+        .join('\n');
+    final pinnedComponents = await _findPinnedComponents(
+      '$contextText\n$prompt',
+      areaId,
+      prompt: prompt,
+      preferred: widget.initialPinnedComponents,
+    );
+    final userRequestText = messages
+        .where((message) => message['role'] == 'user')
+        .map((message) => message['text'] ?? '')
+        .join('\n');
+    final budget = _requestedBudget(userRequestText);
+    var proposalBudget = budget;
+    Map<String, dynamic> proposal;
+    try {
+      proposal = await ApiClient.instance.generateBuildSuggestion(
+        budget: proposalBudget,
+        purpose: prompt,
+        areaId: areaId,
+        pinnedComponents: pinnedComponents,
+      );
+    } on ApiException catch (error) {
+      final budgetRejected =
+          error.statusCode == 422 &&
+          (error.message.toLowerCase().contains('ngân sách') ||
+              error.message.toLowerCase().contains('cấu hình tương thích'));
+      if (!budgetRejected) rethrow;
+      proposalBudget = (((budget * 1.25) / 1000000).ceil() * 1000000).toInt();
+      if (proposalBudget <= budget) proposalBudget = budget + 5000000;
+      proposal = await ApiClient.instance.generateBuildSuggestion(
+        budget: proposalBudget,
+        purpose: prompt,
+        areaId: areaId,
+        pinnedComponents: pinnedComponents,
+      );
+    }
+    if (!mounted) return;
+    final components = proposal['components'] is Map
+        ? Map<String, dynamic>.from(proposal['components'] as Map)
+        : <String, dynamic>{};
+    final componentDetails = proposal['componentDetails'] is Map
+        ? Map<String, dynamic>.from(proposal['componentDetails'] as Map)
+        : <String, dynamic>{};
+    if (components.isEmpty) {
+      showDemoMessage(
+        context,
+        'AI chưa đề xuất được linh kiện cho cấu hình này.',
+      );
+      return;
+    }
+    final action = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cấu hình AI đề xuất'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 410,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${proposal['name'] ?? 'BuildMate'} • ${components.length}/8 linh kiện',
+                ),
+                if (proposalBudget > budget) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Ngân sách ${formatVnd(budget)} chưa đủ cho linh kiện đã chọn; đây là phương án gần nhất trong mức ${formatVnd(proposalBudget)}.',
+                    style: const TextStyle(color: Colors.amber),
+                  ),
+                ],
+                if (parseApiNumber(proposal['totalPrice']) != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    '${proposal['priceEstimate'] == true ? 'Tạm tính' : 'Tổng giá SQL'}: ${formatVnd(parseApiNumber(proposal['totalPrice'])!.round())}',
+                    style: const TextStyle(
+                      color: mint,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                ...components.entries.map(
+                  (entry) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(
+                      _proposalComponentLine(
+                        entry.key.toString(),
+                        entry.value,
+                        componentDetails,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Lưu vào tài khoản SQL để mở và chỉnh sửa trong tab Build?',
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'skip'),
+            child: const Text('Để sau'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, 'save'),
+            child: const Text('Lưu build'),
+          ),
+        ],
+      ),
+    );
+    if (action != 'save' || !mounted) return;
+    final previousBuildId = ApiClient.instance.buildId;
+    String? createdBuildId;
+    try {
+      final created = await ApiClient.instance.createBuild(
+        name: proposal['name']?.toString() ?? 'BuildMate AI',
+        budget: (parseApiNumber(proposal['budget']) ?? budget).round(),
+        areaId: areaId,
+      );
+      createdBuildId = created['id']?.toString();
+      if (createdBuildId == null) {
+        throw ApiException('SQL không trả mã build mới.');
+      }
+      ApiClient.instance.buildId = createdBuildId;
+      for (final entry in components.entries) {
+        final id = _proposalComponentId(entry.value);
+        if (id.isNotEmpty) {
+          await ApiClient.instance.updateComponent(entry.key, id);
+        }
+      }
+      ApiClient.instance.buildId = previousBuildId;
+      if (!mounted) return;
+      showDemoMessage(context, 'Đã lưu cấu hình vào SQL. Đang mở tab Build.');
+      widget.onOpenBuild?.call();
+    } catch (error) {
+      if (createdBuildId != null) {
+        try {
+          await ApiClient.instance.deleteBuild(createdBuildId);
+        } catch (_) {}
+      }
+      if (mounted) showDemoMessage(context, 'Không lưu được cấu hình: $error');
+    } finally {
+      ApiClient.instance.buildId = previousBuildId;
+    }
+  }
+
+  String _proposalComponentId(dynamic value) => value is Map
+      ? (value['id'] ?? value['productId'] ?? '').toString()
+      : value?.toString() ?? '';
+
+  String _proposalComponentName(dynamic value) => value is Map
+      ? (value['name'] ?? value['productName'] ?? value['id'] ?? 'Chưa có tên')
+            .toString()
+      : value?.toString() ?? 'Chưa có dữ liệu';
+
+  String _proposalComponentLine(
+    String type,
+    dynamic value,
+    Map<String, dynamic> componentDetails,
+  ) {
+    final detail = componentDetails[type];
+    final name = _proposalComponentName(detail ?? value);
+    final price = detail is Map ? parseApiNumber(detail['price']) : null;
+    return price == null
+        ? '$type: $name'
+        : '$type: $name • ${formatVnd(price.round())}';
+  }
+
+  int _requestedBudget(String text) {
+    final matches = RegExp(
+      r'(\d+(?:[.,]\d+)?)\s*(?:triệu|trieu|tr|m)\b',
+      caseSensitive: false,
+    ).allMatches(text).toList();
+    if (matches.isEmpty) return 40000000;
+    final match = matches.last;
+    final amount = double.tryParse(match.group(1)!.replaceAll(',', '.'));
+    if (amount == null || amount <= 0) return 40000000;
+    return (amount * 1000000).round().clamp(5000000, 2000000000).toInt();
+  }
+
+  Future<Map<String, String>> _findPinnedComponents(
+    String contextText,
+    String areaId, {
+    String prompt = '',
+    Map<String, String> preferred = const {},
+  }) async {
+    final validPreferred = Map<String, String>.from(preferred)
+      ..removeWhere((type, id) => type.isEmpty || id.isEmpty);
+    final userText = messages
+        .where((message) => message['role'] == 'user')
+        .map((message) => message['text'] ?? '')
+        .join('\n')
+        .toLowerCase();
+    final latestRequest = prompt.trim().isNotEmpty ? prompt : userText;
+    final explicitGpuPattern = RegExp(
+      r'\b(?:nvidia\s*)?(?:geforce\s*)?rtx\s*(\d{4})(?:\s*(ti|super))?\b',
+      caseSensitive: false,
+    );
+    final modelPattern = RegExp(
+      r'\b(\d{4})(?:\s*(ti|super))?\b',
+      caseSensitive: false,
+    );
+    final explicitPromptModel =
+        explicitGpuPattern.firstMatch(prompt) ??
+        (() {
+          final promptSeriesMatches = modelPattern.allMatches(prompt).toList();
+          return promptSeriesMatches.length == 1
+              ? promptSeriesMatches.single
+              : null;
+        })();
+    if (explicitPromptModel == null && validPreferred.isNotEmpty) {
+      return validPreferred;
+    }
+    if (validPreferred.isNotEmpty && explicitPromptModel != null) {
+      final preferredModel = explicitGpuPattern.firstMatch(contextText);
+      if (preferredModel != null &&
+          preferredModel.group(1) == explicitPromptModel.group(1) &&
+          (preferredModel.group(2) ?? '').toLowerCase() ==
+              (explicitPromptModel.group(2) ?? '').toLowerCase()) {
+        return validPreferred;
+      }
+    }
+    Match? modelMatch =
+        explicitPromptModel ?? explicitGpuPattern.firstMatch(latestRequest);
+    if (modelMatch == null) {
+      final bareMatches = modelPattern.allMatches(latestRequest).toList();
+      if (bareMatches.length == 1) modelMatch = bareMatches.single;
+    }
+    if (modelMatch == null && latestRequest != contextText) {
+      final priorExplicitMatches = explicitGpuPattern
+          .allMatches(contextText)
+          .toList();
+      if (priorExplicitMatches.isNotEmpty) {
+        modelMatch = priorExplicitMatches.last;
+      }
+      if (modelMatch == null) {
+        final priorBareMatches = modelPattern.allMatches(contextText).toList();
+        if (priorBareMatches.length == 1) modelMatch = priorBareMatches.single;
+      }
+    }
+    if (modelMatch == null) return const {};
+    final series = modelMatch.group(1)!;
+    final suffix = (modelMatch.group(2) ?? '').toLowerCase();
+    final products = await ApiClient.instance.products(
+      'GPU',
+      query: series,
+      areaId: areaId,
+    );
+    if (products.isEmpty) return const {};
+    final requestText = latestRequest.toLowerCase();
+    final asksTi = suffix == 'ti';
+    final asksSuper = suffix == 'super';
+    final requestedBrand = RegExp(
+      r'\b(msi|asus|gigabyte|zotac|palit|galax|gainward|inno3d|pny|evga)\b',
+      caseSensitive: false,
+    ).firstMatch(requestText)?.group(1)?.toLowerCase();
+    final candidates = products.where((item) {
+      final name = item['name']?.toString().toLowerCase() ?? '';
+      final isRtx = name.contains('rtx') || name.contains('geforce');
+      final isTi = RegExp(r'\bti\b').hasMatch(name);
+      final isSuper = name.contains('super');
+      return isRtx &&
+          name.contains(series) &&
+          isTi == asksTi &&
+          isSuper == asksSuper;
+    }).toList();
+    if (candidates.isEmpty) return const {};
+    candidates.sort((a, b) {
+      final an = a['name']?.toString().toLowerCase() ?? '';
+      final bn = b['name']?.toString().toLowerCase() ?? '';
+      final aBrand = requestedBrand == null
+          ? 0
+          : (an.contains(requestedBrand) ? 0 : 1);
+      final bBrand = requestedBrand == null
+          ? 0
+          : (bn.contains(requestedBrand) ? 0 : 1);
+      if (aBrand != bBrand) return aBrand.compareTo(bBrand);
+      final aPrice = parseApiNumber(a['price']) ?? double.maxFinite;
+      final bPrice = parseApiNumber(b['price']) ?? double.maxFinite;
+      return aPrice.compareTo(bPrice);
+    });
+    final productId = candidates.first['id']?.toString();
+    return productId == null ? const {} : {'GPU': productId};
   }
 
   void _useSuggestion(String value) {
@@ -2361,7 +4304,7 @@ class _ChatTabState extends State<ChatTab> {
 class _SuggestionChip extends StatelessWidget {
   const _SuggestionChip({required this.text, required this.onTap});
   final String text;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) => ActionChip(
@@ -2450,7 +4393,9 @@ class _SavedTabState extends State<SavedTab> {
       onPressed: () =>
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) => const BuildTab()),
+            MaterialPageRoute(
+              builder: (_) => const BuildTab(loadLatest: false),
+            ),
           ).then((_) {
             if (mounted) {
               setState(() {
@@ -2493,9 +4438,12 @@ class _SavedTabState extends State<SavedTab> {
               ...builds.map(
                 (build) => SavedCard(
                   name: build['name']?.toString() ?? 'Cấu hình mới',
-                  price:
-                      '${((build['totalPrice'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}đ',
-                  status: (build['completion'] as num? ?? 0) == 100
+                  price: build['priceComplete'] == false
+                      ? 'Chưa đủ giá SQL'
+                      : '${build['priceEstimate'] == true ? '≈ ' : ''}${(parseApiNumber(build['totalPrice']) ?? 0).toStringAsFixed(0)}đ${build['priceEstimate'] == true ? ' • ước tính' : ''}',
+                  status: build['priceComplete'] == false
+                      ? 'THIẾU GIÁ'
+                      : (parseApiNumber(build['completion']) ?? 0) == 100
                       ? 'TƯƠNG THÍCH'
                       : 'ĐANG LÀM',
                   area: build['areaId']?.toString() ?? 'TP. HỒ CHÍ MINH',
@@ -2527,7 +4475,8 @@ class _SavedTabState extends State<SavedTab> {
 }
 
 class AccountTab extends StatefulWidget {
-  const AccountTab({super.key});
+  const AccountTab({super.key, this.onAreaChanged});
+  final void Function(String id, String name)? onAreaChanged;
   @override
   State<AccountTab> createState() => _AccountTabState();
 }
@@ -2570,9 +4519,6 @@ class _AccountTabState extends State<AccountTab> {
 
   Future<void> _editProfile() async {
     final name = TextEditingController(text: user?['name']?.toString() ?? '');
-    final avatar = TextEditingController(
-      text: user?['avatarUrl']?.toString() ?? '',
-    );
     final result = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -2584,10 +4530,6 @@ class _AccountTabState extends State<AccountTab> {
               controller: name,
               decoration: const InputDecoration(labelText: 'Tên người dùng'),
             ),
-            TextField(
-              controller: avatar,
-              decoration: const InputDecoration(labelText: 'URL avatar'),
-            ),
           ],
         ),
         actions: [
@@ -2598,10 +4540,7 @@ class _AccountTabState extends State<AccountTab> {
           FilledButton(
             onPressed: () async {
               try {
-                await ApiClient.instance.updateProfile(
-                  name: name.text.trim(),
-                  avatarUrl: avatar.text.trim(),
-                );
+                await ApiClient.instance.updateProfile(name: name.text.trim());
                 if (dialogContext.mounted) Navigator.pop(dialogContext, true);
               } catch (error) {
                 if (dialogContext.mounted) {
@@ -2615,7 +4554,6 @@ class _AccountTabState extends State<AccountTab> {
       ),
     );
     name.dispose();
-    avatar.dispose();
     if (result == true && mounted) setState(() {});
   }
 
@@ -2638,6 +4576,10 @@ class _AccountTabState extends State<AccountTab> {
     );
     if (area == null) return;
     await ApiClient.instance.updateProfile(areaId: area['id'].toString());
+    widget.onAreaChanged?.call(
+      area['id'].toString(),
+      area['name']?.toString() ?? area['id'].toString(),
+    );
     if (mounted) setState(() {});
   }
 
@@ -2727,6 +4669,15 @@ class _AccountTabState extends State<AccountTab> {
     if (result == true && mounted) setState(() {});
   }
 
+  String _areaName(String? id) =>
+      const {
+        'hcm': 'TP. Hồ Chí Minh',
+        'hanoi': 'Hà Nội',
+        'danang': 'Đà Nẵng',
+      }[id] ??
+      id ??
+      'TP. Hồ Chí Minh';
+
   @override
   Widget build(BuildContext context) => Shell(
     title: 'Tài khoản',
@@ -2789,7 +4740,8 @@ class _AccountTabState extends State<AccountTab> {
             onTap: _changeArea,
             child: InfoTile(
               icon: Icons.location_on_outlined,
-              text: 'ĐỊNH GIÁ HIỆN TẠI · KHU VỰC\n${user?['areaId'] ?? 'hcm'}',
+              text:
+                  'ĐỊNH GIÁ HIỆN TẠI · KHU VỰC\n${_areaName(user?['areaId']?.toString())}',
               trailing: 'Thay đổi',
             ),
           ),
@@ -2815,6 +4767,18 @@ class _AccountTabState extends State<AccountTab> {
                   value: priceNotifications,
                   onToggle: (value) =>
                       _updatePreference(priceNotifications: value),
+                ),
+                SettingRow(
+                  icon: Icons.price_change_outlined,
+                  title: 'Cảnh báo giá đã đặt',
+                  detail: 'Thêm, sửa hoặc xóa cảnh báo trên SQL',
+                  end: '›',
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const PriceAlertsScreen(),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -2875,6 +4839,147 @@ class _AccountTabState extends State<AccountTab> {
           ),
         ],
       ),
+    ),
+  );
+}
+
+class PriceAlertsScreen extends StatefulWidget {
+  const PriceAlertsScreen({super.key});
+
+  @override
+  State<PriceAlertsScreen> createState() => _PriceAlertsScreenState();
+}
+
+class _PriceAlertsScreenState extends State<PriceAlertsScreen> {
+  late Future<List<Map<String, dynamic>>> alerts;
+
+  @override
+  void initState() {
+    super.initState();
+    alerts = ApiClient.instance.priceAlerts();
+  }
+
+  void _reload() => setState(() => alerts = ApiClient.instance.priceAlerts());
+
+  Future<void> _edit(Map<String, dynamic> alert) async {
+    final controller = TextEditingController(
+      text: alert['targetPrice'].toString(),
+    );
+    final target = await showDialog<int>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sửa mức cảnh báo'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'Giá mục tiêu (VNĐ)'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              int.tryParse(controller.text.replaceAll(RegExp(r'[^0-9]'), '')),
+            ),
+            child: const Text('Cập nhật'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (target == null || target <= 0) return;
+    try {
+      await ApiClient.instance.updatePriceAlert(
+        id: alert['id'].toString(),
+        productId: alert['productId'].toString(),
+        targetPrice: target,
+        areaId: alert['areaId'].toString(),
+      );
+      if (mounted) _reload();
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không sửa được cảnh báo: $error');
+    }
+  }
+
+  Future<void> _delete(Map<String, dynamic> alert) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Xóa cảnh báo giá?'),
+        content: Text(
+          'Xóa cảnh báo cho ${alert['productName'] ?? 'linh kiện này'}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Xóa'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await ApiClient.instance.deletePriceAlert(alert['id'].toString());
+      if (mounted) _reload();
+    } catch (error) {
+      if (mounted) showDemoMessage(context, 'Không xóa được cảnh báo: $error');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Shell(
+    title: 'Cảnh báo giá',
+    subtitle: 'Các mức giá được lưu trong SQL',
+    back: true,
+    child: FutureBuilder<List<Map<String, dynamic>>>(
+      future: alerts,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator(color: mint));
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: Text('Không tải được cảnh báo: ${snapshot.error}'),
+          );
+        }
+        final items = snapshot.data ?? const [];
+        if (items.isEmpty) {
+          return const Center(child: Text('Chưa có cảnh báo giá nào.'));
+        }
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: items
+              .map(
+                (item) => CardBox(
+                  child: ListTile(
+                    title: Text(
+                      item['productName']?.toString() ??
+                          item['productId'].toString(),
+                    ),
+                    subtitle: Text(
+                      'Báo khi ≤ ${formatVnd(item['targetPrice'])} • ${item['areaId']} • hiện tại ${formatVnd(item['currentPrice'])}',
+                    ),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (action) =>
+                          action == 'edit' ? _edit(item) : _delete(item),
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'edit', child: Text('Sửa')),
+                        PopupMenuItem(value: 'delete', child: Text('Xóa')),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+              .toList(),
+        );
+      },
     ),
   );
 }
@@ -3128,7 +5233,7 @@ class MarketCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final changedItems = items
-        .where((item) => ((item['trend'] as num?)?.toDouble() ?? 0) != 0)
+        .where((item) => (parseApiNumber(item['trend']) ?? 0) != 0)
         .toList();
     return InkWell(
       onTap: changedItems.isEmpty ? null : onTap,
@@ -3181,8 +5286,7 @@ class MarketCard extends StatelessWidget {
                           ),
                           Builder(
                             builder: (context) {
-                              final trend =
-                                  (item['trend'] as num?)?.toDouble() ?? 0;
+                              final trend = parseApiNumber(item['trend']) ?? 0;
                               return Text(
                                 '${_price(item['price'])}  ${trend < 0 ? '↓' : '↑'} ${trend.abs()}%',
                                 style: const TextStyle(
@@ -3275,7 +5379,7 @@ class BuildProgress extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           LinearProgressIndicator(
-            value: ((buildData!['completion'] as num?)?.toDouble() ?? 0) / 100,
+            value: (parseApiNumber(buildData!['completion']) ?? 0) / 100,
             color: mint,
             backgroundColor: stroke,
           ),
@@ -3304,13 +5408,13 @@ class BuildProgress extends StatelessWidget {
   );
 
   String _formatVnd(dynamic value) {
-    final amount = (value as num?)?.toInt() ?? 0;
+    final amount = (parseApiNumber(value) ?? 0).toInt();
     return '${amount.toString().replaceAllMapped(RegExp(r'(\d)(?=(\d{3})+(?!\d))'), (m) => '${m[1]}.')}đ';
   }
 
   String _remainingPrice(Map<String, dynamic> build) {
-    final budget = (build['budget'] as num?)?.toInt() ?? 0;
-    final total = (build['totalPrice'] as num?)?.toInt() ?? 0;
+    final budget = (parseApiNumber(build['budget']) ?? 0).toInt();
+    final total = (parseApiNumber(build['totalPrice']) ?? 0).toInt();
     return 'Còn ${_formatVnd((budget - total).clamp(0, budget))}';
   }
 
@@ -3337,28 +5441,40 @@ class ProgressLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 15),
-    child: Column(
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final labelText = Text(
+          label,
+          style: const TextStyle(color: muted, fontSize: 10),
+        );
+        final valueText = Text(
+          value,
+          style: TextStyle(color: amber ? Colors.amber : mint, fontSize: 11),
+        );
+        final header = constraints.maxWidth < 380
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  labelText,
+                  Align(alignment: Alignment.centerRight, child: valueText),
+                ],
+              )
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [labelText, valueText],
+              );
+        return Column(
           children: [
-            Text(label, style: const TextStyle(color: muted, fontSize: 10)),
-            Text(
-              value,
-              style: TextStyle(
-                color: amber ? Colors.amber : mint,
-                fontSize: 11,
-              ),
+            header,
+            const SizedBox(height: 7),
+            LinearProgressIndicator(
+              value: progress,
+              color: amber ? Colors.orange : mint,
+              backgroundColor: stroke,
             ),
           ],
-        ),
-        const SizedBox(height: 7),
-        LinearProgressIndicator(
-          value: progress,
-          color: amber ? Colors.orange : mint,
-          backgroundColor: stroke,
-        ),
-      ],
+        );
+      },
     ),
   );
 }
@@ -3479,24 +5595,243 @@ class ProductCard extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   product.price,
-                  style: const TextStyle(
-                    color: mint,
+                  style: TextStyle(
+                    color: product.hasPrice && !product.priceEstimate
+                        ? mint
+                        : Colors.orange,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
               ],
             ),
           ),
-          if (!product.used) const Tag('Phù hợp'),
+          if (!product.hasPrice)
+            const Tag('Thiếu giá')
+          else if (product.priceEstimate)
+            const Tag('Ước tính')
+          else if (!product.used)
+            const Tag('Phù hợp'),
         ],
       ),
     ),
   );
 }
 
+class PowerAssessmentCard extends StatelessWidget {
+  const PowerAssessmentCard({super.key, required this.assessment});
+
+  final Map<String, dynamic> assessment;
+
+  @override
+  Widget build(BuildContext context) {
+    final estimated = parseApiNumber(assessment['estimatedLoadW'])?.round();
+    final recommended = parseApiNumber(assessment['recommendedPsuW'])?.round();
+    final manufacturer = parseApiNumber(assessment['manufacturerMinimumW'])
+        ?.round();
+    final selected = parseApiNumber(assessment['selectedPsuW'])?.round();
+    final margin = parseApiNumber(assessment['marginW'])?.round();
+    final manufacturerMargin = parseApiNumber(
+      assessment['marginVsManufacturerW'],
+    )?.round();
+    final loadMargin = parseApiNumber(assessment['marginFromLoadW'])?.round();
+    final gpuNames = (assessment['manufacturerGpuNames'] as List? ?? const [])
+        .map((item) => item.toString())
+        .toList();
+    final sources = (assessment['manufacturerSources'] as List? ?? const [])
+        .map((item) => item.toString())
+        .toList();
+    final resultColor = selected == null
+        ? Colors.amber
+        : selected >= (recommended ?? 0)
+        ? mint
+        : Colors.orange;
+    String marginText(int? value) => value == null
+        ? 'Chưa đủ dữ liệu'
+        : value >= 0
+        ? 'Dư ${value}W'
+        : 'Thiếu ${value.abs()}W';
+
+    return CardBox(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'ĐÁNH GIÁ BỘ NGUỒN',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          _powerLine(
+            'Tải CPU/GPU ước tính',
+            estimated == null ? 'Chưa đủ dữ liệu' : '~${estimated}W',
+          ),
+          _powerLine(
+            'Mức PSU tối thiểu đề nghị',
+            recommended == null ? 'Chưa xác định' : '≥ ${recommended}W',
+          ),
+          _powerLine(
+            'Mức tối thiểu theo hãng GPU',
+            manufacturer == null
+                ? 'Chưa có trong SQL'
+                : '$manufacturer W${gpuNames.isEmpty ? '' : ' • ${gpuNames.join(', ')}'}',
+          ),
+          _powerLine(
+            'PSU đang chọn',
+            selected == null
+                ? 'Chưa chọn'
+                : '${assessment['selectedPsuName'] ?? 'PSU'} • ${selected}W',
+          ),
+          _powerLine('Dư/thiếu so với mức đề nghị', marginText(margin)),
+          if (manufacturer != null)
+            _powerLine(
+              'Dư/thiếu so với mức hãng',
+              marginText(manufacturerMargin),
+            ),
+          _powerLine(
+            'Chênh so với tải ước tính',
+            '${marginText(loadMargin)} • không phải mức PSU đề nghị',
+          ),
+          const Divider(height: 18),
+          Text(
+            selected == null
+                ? 'Chưa chọn bộ nguồn.'
+                : selected >= (recommended ?? 0)
+                ? 'Đạt mức PSU đề nghị của cấu hình.'
+                : 'Chưa đạt mức PSU đề nghị của cấu hình.',
+            style: TextStyle(color: resultColor, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            assessment['method']?.toString() ??
+                'Ước tính từ dữ liệu linh kiện SQL.',
+            style: const TextStyle(color: muted, fontSize: 11),
+          ),
+          if (sources.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Nguồn dữ liệu hãng: ${sources.map((source) => Uri.tryParse(source)?.host ?? source).join(', ')}',
+              style: const TextStyle(color: muted, fontSize: 10),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _powerLine(String label, String value) => Padding(
+    padding: const EdgeInsets.only(bottom: 4),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(color: muted, fontSize: 11),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(fontSize: 11),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class CompatibilityCriterionCard extends StatelessWidget {
+  const CompatibilityCriterionCard({
+    super.key,
+    required this.title,
+    required this.status,
+    required this.detail,
+    required this.remediation,
+  });
+
+  final String title;
+  final String status;
+  final String detail;
+  final String remediation;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = status == 'pass'
+        ? mint
+        : status == 'unchecked'
+        ? Colors.amber
+        : Colors.redAccent;
+    final label = status == 'pass'
+        ? 'ĐẠT'
+        : status == 'unchecked'
+        ? 'CHƯA KIỂM TRA'
+        : status == 'warning'
+        ? 'CẢNH BÁO'
+        : 'KHÔNG ĐẠT';
+    return CardBox(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: .14),
+                    border: Border.all(color: color.withValues(alpha: .5)),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: color,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 9,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (detail.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(detail, style: const TextStyle(fontSize: 12)),
+            ],
+            if (status != 'pass' && remediation.isNotEmpty) ...[
+              const SizedBox(height: 5),
+              Text(remediation, style: TextStyle(color: color, fontSize: 11)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class ScoreCard extends StatelessWidget {
-  const ScoreCard({super.key, this.score});
+  const ScoreCard({
+    super.key,
+    this.score,
+    this.verdict,
+    this.selectedCount,
+    this.checkedCount,
+  });
   final int? score;
+  final String? verdict;
+  final int? selectedCount;
+  final int? checkedCount;
+
   @override
   Widget build(BuildContext context) => CardBox(
     child: Row(
@@ -3519,23 +5854,25 @@ class ScoreCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                score == null
-                    ? 'Cần điều chỉnh'
-                    : score! >= 80
-                    ? 'Tương thích tốt'
-                    : 'Cần điều chỉnh',
+                verdict == 'incompatible'
+                    ? 'Có linh kiện không tương thích'
+                    : verdict == 'warning'
+                    ? 'Có cảnh báo cần xem'
+                    : verdict == 'partial'
+                    ? 'Đã kiểm tra một phần'
+                    : score == null
+                    ? 'Chưa đủ dữ liệu'
+                    : 'Không thấy xung đột đã biết',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               Text(
-                score == null
-                    ? '11 lỗi • 2 cảnh báo • 9 tiêu chí đạt'
-                    : 'Điểm tương thích từ API: $score/100',
+                '${selectedCount ?? 0}/8 linh kiện • ${checkedCount ?? 0} tiêu chí đã kiểm tra${score == null ? '' : ' • $score/100 trên tiêu chí đã kiểm tra'}',
                 style: TextStyle(color: muted, fontSize: 11),
               ),
             ],
           ),
         ),
-        Tag(score == null ? '12/12' : '$score/100'),
+        Tag(score == null ? '—' : '$score/100'),
       ],
     ),
   );

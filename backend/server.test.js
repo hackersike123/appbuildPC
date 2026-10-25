@@ -1,181 +1,270 @@
+const { randomBytes } = require('node:crypto');
+
+process.env.JWT_SECRET ??= randomBytes(32).toString('hex');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
-const testDbFile = path.join(os.tmpdir(), `pcbuild-local-api-test-${process.pid}.json`);
-process.env.PCBUILD_DB_FILE = testDbFile;
-process.env.PCBUILD_USE_SQL = 'false';
-const { server, db } = require('./server');
+const {
+  server,
+  compatibility,
+  powerAssessment,
+  pcChatNeedsExpertReview,
+  scanCompletionMatchesCatalog,
+  hasVisibleSkuEvidence,
+  hasUsableProductPrice,
+  selectSqlBuild,
+  catalogPromptSelection,
+  catalogForVisionCandidate
+} = require('./server');
 
-test('register, login, build and compatibility flow', async () => {
-  db.users.length = 0;
-  db.builds.length = 0;
-  await new Promise((resolve) => server.listen(0, resolve));
-  const base = `http://localhost:${server.address().port}`;
-  const request = (path, options) => fetch(`${base}${path}`, {
-    headers: { 'content-type': 'application/json', ...(options?.headers || {}) },
-    ...options,
-    body: options?.body && JSON.stringify(options.body)
+test('health and OpenAPI work while debug headers require authentication', async (t) => {
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const healthResponse = await fetch(`${baseUrl}/health`);
+  assert.equal(healthResponse.status, 200);
+  assert.deepEqual(await healthResponse.json(), {
+    ok: true,
+    service: 'pcbuild-local-api'
   });
 
-  const register = await request('/api/v1/auth/register', {
-    method: 'POST', body: { name: 'Test User', email: 'test@example.com', password: 'password123' }
+  const openApiResponse = await fetch(`${baseUrl}/openapi.json`);
+  assert.equal(openApiResponse.status, 200);
+  const openApi = await openApiResponse.json();
+  assert.equal(openApi.openapi, '3.0.3');
+  assert.ok(openApi.paths['/api/v1/builds']);
+
+  const debugHeaders = await fetch(`${baseUrl}/api/v1/debug/headers`);
+  assert.equal(debugHeaders.status, 401);
+  assert.deepEqual(await debugHeaders.json(), {
+    error: 'UNAUTHORIZED',
+    message: 'Bearer token is required.'
   });
-  assert.equal(register.status, 201);
-  const duplicate = await request('/api/v1/auth/register', {
-    method: 'POST', body: { name: 'Another User', email: ' TEST@EXAMPLE.COM ', password: 'password123' }
-  });
-  assert.equal(duplicate.status, 409);
-  const invalidRegister = await request('/api/v1/auth/register', {
-    method: 'POST', body: { name: 'A', email: 'invalid', password: 'short' }
-  });
-  assert.equal(invalidRegister.status, 422);
-  const login = await request('/api/v1/auth/login', {
-    method: 'POST', body: { email: ' TEST@EXAMPLE.COM ', password: 'password123' }
-  });
-  assert.equal(login.status, 200);
-  const { accessToken } = await login.json();
-  assert.equal(accessToken.split('.').length, 3);
-  const headers = { Authorization: `Bearer ${accessToken}` };
-  const invalidAuth = await request('/api/v1/auth/me', {
-    method: 'GET', headers: { Authorization: 'Bearer invalid.jwt.token' }
-  });
-  assert.equal(invalidAuth.status, 401);
-  const me = await request('/api/v1/auth/me', { method: 'GET', headers });
-  assert.equal(me.status, 200);
-  const updatedProfile = await request('/api/v1/auth/me', {
-    method: 'PUT',
-    headers,
-    body: {
-      name: 'Updated User',
-      areaId: 'hanoi',
-      preferences: { pricePreference: false, priceNotifications: true }
-    }
-  });
-  assert.equal(updatedProfile.status, 200);
-  const updatedProfileBody = await updatedProfile.json();
-  assert.equal(updatedProfileBody.name, 'Updated User');
-  assert.equal(updatedProfileBody.preferences.pricePreference, false);
-  const notifications = await request('/api/v1/notifications', { method: 'GET', headers });
-  assert.equal(notifications.status, 200);
-  assert.equal((await notifications.json()).length, 1);
-  const readNotifications = await request('/api/v1/notifications/read', { method: 'POST', headers, body: {} });
-  assert.equal(readNotifications.status, 200);
-  const forgot = await request('/api/v1/auth/forgot-password', {
-    method: 'POST', body: { email: 'unknown@example.com' }
-  });
-  assert.equal(forgot.status, 202);
-  const resetPage = await request('/reset-password?token=test-reset-token', {
-    method: 'GET'
-  });
-  assert.equal(resetPage.status, 200);
-  assert.match(await resetPage.text(), /ĐẶT LẠI MẬT KHẨU/);
-  const resetToken = 'test-reset-token';
-  db.passwordResetTokens.push({
-    tokenHash: require('node:crypto').createHash('sha256').update(resetToken).digest('hex'),
-    userId: db.users[0].id,
-    expiresAt: Date.now() + 60_000,
-    usedAt: null
-  });
-  const reset = await request('/api/v1/auth/reset-password', {
-    method: 'POST', body: { token: resetToken, password: 'newpassword123' }
-  });
-  assert.equal(reset.status, 200);
-  const relogin = await request('/api/v1/auth/login', {
-    method: 'POST', body: { email: 'test@example.com', password: 'newpassword123' }
-  });
-  assert.equal(relogin.status, 200);
-  const reusedReset = await request('/api/v1/auth/reset-password', {
-    method: 'POST', body: { token: resetToken, password: 'anotherpass123' }
-  });
-  assert.equal(reusedReset.status, 400);
-  const build = await request('/api/v1/builds', {
-    method: 'POST', headers, body: { name: 'Test build' }
-  });
-  assert.equal(build.status, 201);
-  const buildBody = await build.json();
-  const fetchedBuild = await request(`/api/v1/builds/${buildBody.id}`, { method: 'GET', headers });
-  assert.equal(fetchedBuild.status, 200);
-  const component = await request(`/api/v1/builds/${buildBody.id}/components/CPU`, {
-    method: 'PUT', headers, body: { productId: 'cpu-7600' }
-  });
-  assert.equal(component.status, 200);
-  const cooler = await request(`/api/v1/builds/${buildBody.id}/components/${encodeURIComponent('TẢN NHIỆT')}`, {
-    method: 'PUT', headers, body: { productId: 'cooler-ak400' }
-  });
-  assert.equal(cooler.status, 200);
-  assert.equal(cooler.headers.get('content-type').includes('application/json'), true);
-  const coolerBody = await cooler.json();
-  assert.equal(coolerBody.components['TẢN NHIỆT'].id, 'cooler-ak400');
-  const removedCpu = await request(`/api/v1/builds/${buildBody.id}/components/CPU`, {
-    method: 'PUT', headers, body: { productId: null }
-  });
-  assert.equal(removedCpu.status, 200);
-  const afterComponentRemoval = await removedCpu.json();
-  assert.equal(afterComponentRemoval.components.CPU, null);
-  assert.equal(afterComponentRemoval.components['TẢN NHIỆT'].id, 'cooler-ak400');
-  const renamed = await request(`/api/v1/builds/${buildBody.id}`, {
-    method: 'PUT', headers, body: { name: 'Updated build', budget: 25000000 }
-  });
-  assert.equal(renamed.status, 200);
-  const renamedBody = await renamed.json();
-  assert.equal(renamedBody.name, 'Updated build');
-  const conflict = await request(`/api/v1/builds/${buildBody.id}`, {
-    method: 'PUT', headers, body: { name: 'Stale write', expectedVersion: 1 }
-  });
-  assert.equal(conflict.status, 409);
-  const duplicateBuild = await request(`/api/v1/builds/${buildBody.id}/duplicate`, {
-    method: 'POST', headers, body: { name: 'Copied build' }
-  });
-  assert.equal(duplicateBuild.status, 201);
-  assert.equal((await duplicateBuild.json()).name, 'Copied build');
-  const listedBuilds = await request('/api/v1/builds', { method: 'GET', headers });
-  assert.equal((await listedBuilds.json()).length, 2);
-  const products = await request('/api/v1/products?type=GPU', { method: 'GET' });
-  assert.ok((await products.json()).length >= 4);
-  const comparison = await request('/api/v1/compare?productIds=gpu-4060,gpu-4060-gigabyte', { method: 'GET' });
-  assert.equal(comparison.status, 200);
-  assert.equal((await comparison.json()).products.length, 2);
-  const scan = await request('/api/v1/scans', {
-    method: 'POST', headers, body: { candidateProductIds: ['gpu-4060', 'gpu-4060-msi'], confidence: 0.82 }
-  });
-  assert.equal(scan.status, 201);
-  const scanBody = await scan.json();
-  assert.equal(scanBody.status, 'awaiting_confirmation');
-  const confirmedScan = await request(`/api/v1/scans/${scanBody.id}/confirm`, {
-    method: 'POST', headers, body: { productId: 'gpu-4060-msi' }
-  });
-  assert.equal(confirmedScan.status, 200);
-  assert.equal((await confirmedScan.json()).status, 'confirmed');
-  const support = await request('/api/v1/support-requests', {
-    method: 'POST', headers, body: { message: 'Tôi cần hỗ trợ kiểm tra cấu hình.' }
-  });
-  assert.equal(support.status, 201);
-  const compatibility = await request('/api/v1/compatibility/check', {
-    method: 'POST', headers, body: { components: { CPU: 'cpu-7600', MAINBOARD: 'mb-b650m' } }
-  });
-  assert.equal(compatibility.status, 200);
-  assert.equal((await compatibility.json()).status, 'compatible');
-  const areas = await request('/api/v1/areas', { method: 'GET' });
-  assert.equal(areas.status, 200);
-  assert.ok((await areas.json()).length >= 3);
-  const location = await request('/api/v1/location/resolve', {
-    method: 'POST', body: { lat: 21.0278, lng: 105.8342 }
-  });
-  const locationBody = await location.json();
-  assert.equal(locationBody.area.id, 'hanoi');
-  assert.equal(locationBody.source, 'gps');
-  const market = await request('/api/v1/market/summary?areaId=hcm', { method: 'GET' });
-  const hcmMarket = await market.json();
-  assert.ok(hcmMarket.items.length >= 8);
-  const hanoiMarket = await request('/api/v1/market/summary?areaId=hanoi', { method: 'GET' });
-  assert.notEqual((await hanoiMarket.json()).items[0].price, hcmMarket.items[0].price);
-  const deleted = await request(`/api/v1/builds/${buildBody.id}`, { method: 'DELETE', headers });
-  assert.equal(deleted.status, 204);
-  const missing = await request(`/api/v1/builds/${buildBody.id}`, { method: 'GET', headers });
-  assert.equal(missing.status, 404);
-  await new Promise((resolve) => server.close(resolve));
-  fs.rmSync(testDbFile, { force: true });
+});
+
+test('PSU recommendations honor the GPU maker minimum and explain shortfall', () => {
+  const components = [
+    { id: 'cpu', type: 'CPU', name: 'CPU thử nghiệm', power: 65 },
+    { id: 'gpu', type: 'GPU', name: 'RTX 3060 Twin Edge', power: 170, recommendedPsuW: 600, recommendedPsuSource: 'https://maker.example/gpu.pdf' },
+    { id: 'psu', type: 'PSU', name: 'PSU 550W', watts: 550 }
+  ];
+  const assessment = powerAssessment(components);
+  assert.equal(assessment.estimatedLoadW, 235);
+  assert.equal(assessment.recommendedPsuW, 600);
+  assert.equal(assessment.marginW, -50);
+  assert.equal(assessment.marginFromLoadW, 315);
+  assert.equal(assessment.marginVsManufacturerW, -50);
+
+  const report = compatibility({ CPU: 'cpu', GPU: 'gpu', PSU: 'psu' }, components);
+  assert.equal(report.status, 'warning');
+  assert.equal(report.issues[0].code, 'PSU');
+  assert.match(report.issues[0].message, /thiếu 50W.*hãng khuyến nghị 600W/);
+  assert.match(report.criteria.find((item) => item.code === 'PSU').detail, /PSU 550W.*thiếu 50W/);
+});
+
+test('PSU system estimate is not mislabeled as the GPU manufacturer minimum', () => {
+  const components = [
+    { id: 'cpu', type: 'CPU', name: 'CPU thử nghiệm', power: 65 },
+    { id: 'gpu', type: 'GPU', name: 'RTX 4060', power: 500, recommendedPsuW: 550, recommendedPsuSource: 'https://maker.example/4060.pdf' },
+    { id: 'psu', type: 'PSU', name: 'PSU 800W', watts: 800 }
+  ];
+  const report = compatibility({ CPU: 'cpu', GPU: 'gpu', PSU: 'psu' }, components);
+  assert.equal(report.powerAssessment.estimatedLoadW, 565);
+  assert.equal(report.powerAssessment.recommendedPsuW, 850);
+  assert.equal(report.powerAssessment.marginW, -50);
+  assert.equal(report.powerAssessment.marginVsManufacturerW, 250);
+  assert.match(report.issues[0].message, /thiếu 50W so với mức hệ thống đề nghị 850W \(mức hãng là 550W\)/);
+  assert.doesNotMatch(report.issues[0].message, /hãng khuyến nghị 850W/);
+});
+
+test('an empty component list reports no estimated or recommended PSU power', () => {
+  const assessment = powerAssessment([]);
+  assert.equal(assessment.estimatedLoadW, 0);
+  assert.equal(assessment.calculatedMinimumW, 0);
+  assert.equal(assessment.recommendedPsuW, 0);
+  assert.equal(assessment.selectedPsuW, null);
+});
+
+test('PSU wattage can be read from its model name and is not counted as system load', () => {
+  const components = [
+    { id: 'cpu', type: 'CPU', name: 'Ryzen', power: 120, socket: 'AM5' },
+    { id: 'gpu', type: 'GPU', name: 'RTX sample', power: 220 },
+    { id: 'psu', type: 'PSU', name: 'iStarUSA TC-1200PD8G Gray ATX 1200W Fully Modular', power: 1200 },
+    { id: 'board', type: 'MAINBOARD', name: 'Board ATX', socket: 'AM5', form: 'ATX' },
+    { id: 'case', type: 'CASE', name: 'Mid Tower', form: 'ATX Mid Tower' }
+  ];
+  const report = compatibility({ CPU: 'cpu', GPU: 'gpu', PSU: 'psu', MAINBOARD: 'board', CASE: 'case' }, components);
+  assert.equal(report.powerAssessment.estimatedLoadW, 340);
+  assert.equal(report.powerAssessment.selectedPsuW, 1200);
+  assert.equal(report.issues.some((issue) => issue.code === 'PSU'), false);
+  assert.equal(report.issues.some((issue) => issue.code === 'CASE_FORM'), false);
+});
+
+test('an absent PSU stays unchecked but includes an actionable recommendation', () => {
+  const components = [
+    { id: 'cpu', type: 'CPU', name: 'CPU thử nghiệm', power: 65, price: 1000000 },
+    { id: 'gpu', type: 'GPU', name: 'RTX 4060', power: 115, recommendedPsuW: 550, recommendedPsuSource: 'https://maker.example/4060.pdf', price: 10000000 },
+    { id: 'psu-650', type: 'PSU', name: 'PSU 650W', watts: 650, price: 1500000 }
+  ];
+  const report = compatibility({ CPU: 'cpu', GPU: 'gpu' }, components);
+  assert.equal(report.status, 'partial');
+  assert.equal(report.powerAssessment.recommendedPsuW, 550);
+  assert.equal(report.powerAssessment.selectedPsuW, null);
+  assert.equal(report.powerAssessment.marginVsManufacturerW, null);
+  assert.equal(report.criteria.find((item) => item.code === 'PSU').status, 'unchecked');
+  assert.equal(report.recommendations[0].name, 'PSU 650W');
+});
+
+test('high-risk PC questions are sent for expert review when local answers miss required details', () => {
+  const answer = (content) => ({ choices: [{ message: { content } }] });
+  const question = (content) => [{ role: 'user', content }];
+
+  assert.equal(pcChatNeedsExpertReview(
+    question('Dây modular PSU cũ cùng hãng dùng cho PSU mới được không?'),
+    answer('Không nên dùng dây cũ nếu chưa rõ model.')
+  ), true);
+  assert.equal(pcChatNeedsExpertReview(
+    question('Dây modular PSU cũ cùng hãng dùng cho PSU mới được không?'),
+    answer('Không dùng nếu chưa xác nhận sơ đồ chân pinout theo đúng model PSU.')
+  ), false);
+  assert.equal(pcChatNeedsExpertReview(
+    question('PC có mùi khét và tiếng tách điện, tôi làm gì?'),
+    answer('Tắt máy và rút điện ngay, không sử dụng lại, gọi kỹ thuật viên.')
+  ), false);
+  assert.equal(pcChatNeedsExpertReview(
+    question('PC có mùi khét và tiếng tách điện, tôi làm gì?'),
+    answer('Tắt máy, mở PSU kiểm tra tụ điện.')
+  ), true);
+  assert.equal(pcChatNeedsExpertReview(
+    question('Gửi tôi đúng file BIOS cho mainboard chưa rõ model.'),
+    answer('Chưa thể xác định; cần đúng model/revision và manual của hãng.')
+  ), false);
+  assert.equal(pcChatNeedsExpertReview(
+    question('DDR5 memory training ở lần boot đầu, nên làm gì?'),
+    answer('Chờ theo manual và quan sát đèn POST, không ngắt nguồn lặp lại.')
+  ), false);
+  assert.equal(pcChatNeedsExpertReview(
+    question('DDR5 memory training ở lần boot đầu, nên làm gì?'),
+    answer('Rút điện rồi chờ 15–30 phút để RAM xả.')
+  ), true);
+});
+
+test('vision scan only accepts a high-confidence exact catalog product ID', () => {
+  const catalog = [{ id: 'gpu-3060-zotac', type: 'GPU', name: 'Zotac RTX 3060 Twin Edge' }];
+  const completion = (content) => ({ choices: [{ message: { content } }] });
+
+  assert.equal(scanCompletionMatchesCatalog(completion(
+    '{"recognized":true,"productId":"gpu-3060-zotac","confidence":0.98,"summary":"Tem khớp chính xác."}'
+  ), catalog), true);
+  assert.equal(scanCompletionMatchesCatalog(completion(
+    '{"recognized":true,"productId":"gpu-3060-other","confidence":0.99,"summary":"Có vẻ giống."}'
+  ), catalog), false);
+  assert.equal(scanCompletionMatchesCatalog(completion(
+    '{"recognized":true,"productId":"gpu-3060-zotac","confidence":0.7,"summary":"Ảnh chưa đủ rõ."}'
+  ), catalog), false);
+});
+
+test('vision only confirms an exact GPU SKU when its model number is visibly read', () => {
+  const gpu = { id: 'gpu-3060-gigabyte', type: 'GPU', name: 'Gigabyte GeForce RTX 3060 Gaming OC' };
+  const gpuTi = { id: 'gpu-5060-ti', type: 'GPU', name: 'ASUS GeForce RTX 5060 Ti OC' };
+  assert.equal(hasVisibleSkuEvidence(gpu, { visibleText: 'GIGABYTE GEFORCE RTX' }), false);
+  assert.equal(hasVisibleSkuEvidence(gpu, { visibleText: 'GIGABYTE GEFORCE RTX 3060' }), true);
+  assert.equal(hasVisibleSkuEvidence(gpuTi, { visibleText: 'ASUS GEFORCE RTX 5060' }), false);
+  assert.equal(hasVisibleSkuEvidence(gpuTi, { visibleText: 'ASUS GEFORCE RTX 5060 Ti' }), true);
+});
+
+test('zero-price catalog items are not treated as priced products', () => {
+  assert.equal(hasUsableProductPrice({ price: 0 }), false);
+  assert.equal(hasUsableProductPrice({ price: '0' }), false);
+  assert.equal(hasUsableProductPrice({ price: null }), false);
+  assert.equal(hasUsableProductPrice({ price: 1250000 }), true);
+});
+
+test('SQL build selection ignores zero-price items and marks estimates', () => {
+  const parts = [
+    { id: 'cpu', type: 'CPU', name: 'CPU', price: 500, socket: 'AM5', power: 65, priceSource: 'market' },
+    { id: 'board', type: 'MAINBOARD', name: 'Board', price: 500, socket: 'AM5', ram: 'DDR5', form: 'mATX', priceSource: 'market' },
+    { id: 'gpu', type: 'GPU', name: 'GPU', price: 600, power: 170, length: 200, recommendedPsuW: 550, priceSource: 'market' },
+    { id: 'ram', type: 'RAM', name: 'RAM', price: 100, ram: 'DDR5', priceSource: 'market' },
+    { id: 'ssd', type: 'SSD', name: 'SSD', price: 100, priceSource: 'market' },
+    { id: 'psu', type: 'PSU', name: 'PSU', price: 100, watts: 650, priceSource: 'market' },
+    { id: 'case', type: 'CASE', name: 'Case', price: 100, form: 'mATX', gpuLength: 260, priceSource: 'market' },
+    { id: 'cooler', type: 'TẢN NHIỆT', name: 'Cooler', price: 100, socket: 'AM5', priceSource: 'market' }
+  ];
+  const zeroPrice = parts.map((item) => ({ ...item, id: `zero-${item.id}`, price: 0 }));
+
+  const marketBuild = selectSqlBuild([...zeroPrice, ...parts], 10000, 'test', 'hcm');
+  assert.ok(marketBuild);
+  assert.equal(marketBuild.totalPrice, 2100);
+  assert.equal(marketBuild.priceEstimate, false);
+
+  const estimatedBuild = selectSqlBuild(
+    parts.map((item) => ({ ...item, priceSource: 'catalog_estimate' })),
+    10000,
+    'test',
+    'hcm'
+  );
+  assert.ok(estimatedBuild);
+  assert.equal(estimatedBuild.priceEstimate, true);
+});
+
+test('PC chat receives a compact catalog slice that includes matching products', () => {
+  const catalog = [
+    ...Array.from({ length: 200 }, (_, index) => ({
+      id: `cpu-${index}`,
+      type: 'CPU',
+      name: `CPU model ${index}`,
+      price: 2000000 + index,
+      priceSource: 'market'
+    })),
+    ...Array.from({ length: 80 }, (_, index) => ({
+      id: `gpu-rtx-4060-${index}`,
+      type: 'GPU',
+      name: `RTX 4060 model ${index}`,
+      price: 10000000 + index,
+      priceSource: 'market'
+    }))
+  ];
+  const selected = catalogPromptSelection(
+    catalog,
+    [{ role: 'user', content: 'Tìm card RTX 4060 trong SQL' }]
+  );
+  assert.ok(selected.length <= 32);
+  assert.ok(selected.some((item) => item.name.includes('RTX 4060')));
+  assert.ok(selected.some((item) => item.type === 'GPU'));
+});
+
+test('vision catalog context stays bounded and promotes OCR model matches', () => {
+  const catalog = [
+    ...Array.from({ length: 100 }, (_, index) => ({
+      id: `gpu-other-${index}`,
+      type: 'GPU',
+      name: `GPU unrelated model ${index}`,
+      price: 5000000 + index,
+      priceSource: 'catalog_estimate'
+    })),
+    { id: 'gpu-rtx-4060', type: 'GPU', name: 'Gigabyte RTX 4060 Windforce OC', price: 7000000, priceSource: 'market' }
+  ];
+  const selected = catalogForVisionCandidate(
+    { componentType: 'GPU', visibleText: 'Gigabyte RTX 4060 Windforce' },
+    catalog
+  );
+  assert.ok(selected.length <= 80);
+  assert.ok(selected.some((item) => item.id === 'gpu-rtx-4060'));
+});
+
+test('vision shortlist follows visible GPU family text over a conflicting visual guess', () => {
+  const selected = catalogForVisionCandidate(
+    { componentType: 'GPU', brand: 'Gigabyte', visibleText: 'GIGABYTE GEFORCE RTX', modelFamily: 'Radeon RX 7600' },
+    [
+      { id: 'gpu-rx-7600', type: 'GPU', name: 'Gigabyte Radeon RX 7600 Gaming', price: 100 },
+      { id: 'gpu-rtx-3050', type: 'GPU', name: 'Gigabyte GeForce RTX 3050 Eagle', price: 200 }
+    ]
+  );
+  assert.equal(selected[0].id, 'gpu-rtx-3050');
 });
