@@ -1,0 +1,19 @@
+{
+  "name": "pcbuild-context7",
+  "version": "1.0.0",
+  "description": "Use Context7 to look up current library documentation for PCBUILD.",
+  "author": {
+    "name": "PCBUILD project"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "PCBUILD Docs",
+    "shortDescription": "Look up current library docs for PCBUILD",
+    "longDescription": "Retrieve version-aware Flutter, Dart, Node.js, and related library documentation while following PCBUILD architecture guidance.",
+    "developerName": "PCBUILD project",
+    "category": "Productivity",
+    "capabilities": ["Read"]
+  }
+}
+

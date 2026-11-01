@@ -1,0 +1,3 @@
+interface:
+  display_name: "PCBUILD Docs"
+  short_description: "Look up current library documentation"

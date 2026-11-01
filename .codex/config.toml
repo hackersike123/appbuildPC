@@ -1,0 +1,8 @@
+# Project-local Codex MCP. Requires Node.js 22.5+ for DBHub.
+[mcp_servers.pcbuild_sql]
+command = "node"
+args = [".codex/mcp/start-dbhub.cjs"]
+cwd = "."
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+

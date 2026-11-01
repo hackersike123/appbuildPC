@@ -1,0 +1,13 @@
+[[sources]]
+id = "pcbuild"
+description = "PCBUILD runtime SQL Server schema; use only for read-only schema exploration and queries."
+dsn = "${PCBUILD_MSSQL_DSN}"
+connection_timeout = 15
+query_timeout = 30
+
+[[tools]]
+name = "execute_sql"
+source = "pcbuild"
+readonly = true
+max_rows = 200
+

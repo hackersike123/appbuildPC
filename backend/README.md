@@ -4,6 +4,18 @@ API Node.js native HTTP. Runtime hiện tại truy cập SQL Server qua
 `sql-models.js` và cần các bảng quan hệ được tạo bởi `ensure_schema.js`.
 `data.json` không còn là fallback runtime.
 
+## Cấu trúc backend
+
+- `server.js` khởi tạo HTTP server và bootstrap schema runtime.
+- `routes/` chia endpoint thành system/public, account, builds, scans, AI và
+  alerts/support; `routes/index.js` điều phối request.
+- `auth.js`, `http-utils.js`, `ai-service.js` và `build-service.js` tách bảo mật,
+  HTTP helpers, provider AI và logic build/compatibility.
+- `sql-models.js` là facade của `sql/connection.js`, `sql/users.js`,
+  `sql/products.js`, `sql/builds.js`, `sql/alerts.js`, `sql/activity.js` và
+  `sql/market.js`; SQL vẫn là nguồn có thẩm quyền cho catalog, giá, builds và
+  tài khoản.
+
 ## Khởi động backend đầy đủ trên Windows
 
 Từ thư mục gốc, chạy [start-full-backend.bat](../start-full-backend.bat):
@@ -78,7 +90,7 @@ Biến môi trường:
 | Biến | Mặc định | Ý nghĩa |
 |---|---:|---|
 | `PORT` | `3000` | Cổng HTTP |
-| `JWT_SECRET` | — | Bắt buộc cấu hình một secret riêng trước khi chạy |
+| `JWT_SECRET` | secret dev | Bắt buộc đổi khi public |
 | `JWT_EXPIRES_IN` | `3600` | Thời hạn JWT, tính bằng giây |
 | `MSSQL_SERVER` | - | Hostname SQL Server |
 | `MSSQL_PORT` | - | Cổng SQL Server |

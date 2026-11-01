@@ -127,25 +127,36 @@ def normalize(text: str) -> str:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adapter", type=Path, default=DEFAULT_ADAPTER)
+    parser.add_argument(
+        "--base-model",
+        default=BASE,
+        help="Base model used by the adapter (for example Qwen/Qwen3.5-4B)",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=220)
     parser.add_argument("--output", type=Path, default=None, help="Optional evaluation report path")
     args = parser.parse_args()
-    sys.stdout.reconfigure(encoding="utf-8")
+    reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure_stdout is not None:
+        reconfigure_stdout(encoding="utf-8")
 
     with (DATA).open(encoding="utf-8") as f:
         system = json.loads(next(f))["messages"][0]["content"]
     processor = AutoProcessor.from_pretrained(args.adapter)
+    capability_major, _ = torch.cuda.get_device_capability(0)
+    use_bf16 = torch.cuda.is_bf16_supported() and capability_major >= 8
+    compute_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    gpu_gib = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
     quantization = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=compute_dtype,
     )
     model = AutoModelForMultimodalLM.from_pretrained(
-        BASE,
+        args.base_model,
         quantization_config=quantization,
         device_map="auto",
-        max_memory={0: "5.3GiB", "cpu": "7GiB"},
+        max_memory={0: f"{max(5, int(gpu_gib) - 1)}GiB", "cpu": "12GiB"},
         low_cpu_mem_usage=True,
         attn_implementation="sdpa",
     )
@@ -159,16 +170,13 @@ def main():
         ]
         inputs = processor.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
-            return_dict=True, return_tensors="pt"
+            return_dict=True, return_tensors="pt", enable_thinking=False
         ).to(device)
         with torch.inference_mode():
             generated = model.generate(
                 **inputs,
                 max_new_tokens=args.max_new_tokens,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.8,
-                top_k=20,
+                do_sample=False,
                 repetition_penalty=1.0,
             )
         answer = processor.decode(
@@ -195,7 +203,12 @@ def main():
         results.append(result)
         print(json.dumps(result, ensure_ascii=False))
 
-    summary = {"passed": sum(x["passed"] for x in results), "total": len(results), "results": results}
+    summary = {
+        "base_model": args.base_model,
+        "passed": sum(x["passed"] for x in results),
+        "total": len(results),
+        "results": results,
+    }
     output = args.output or args.adapter / "qualitative_eval.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

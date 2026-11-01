@@ -18,7 +18,8 @@ from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesCo
 
 MODEL_ID = "Qwen/Qwen3.5-2B"
 ADAPTER_DIR = "training/output/pcbuild-qwen3.5-2b-qlora-v5"
-MODEL_NAME = "pcbuild-qwen3.5-2b-lora-v5"
+DEFAULT_MODEL_NAME = "pcbuild-qwen3.5-2b-lora-v5"
+MODEL_NAME = DEFAULT_MODEL_NAME
 PC_DETECTOR_PATH = Path(__file__).parent / "output" / "pcbuild-pcparts-yolo26n" / "weights" / "best.pt"
 app = FastAPI(title="PCBUILD Local AI", docs_url=None, redoc_url=None)
 model = None
@@ -30,17 +31,23 @@ detector_lock = threading.Lock()
 
 def load_model() -> None:
     global model, processor
+    if not torch.cuda.is_available():
+        raise RuntimeError("A CUDA GPU is required to serve the QLoRA adapter.")
+    capability_major, _ = torch.cuda.get_device_capability(0)
+    use_bf16 = torch.cuda.is_bf16_supported() and capability_major >= 8
+    compute_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    gpu_gib = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
     quantization = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=compute_dtype,
     )
     base = AutoModelForMultimodalLM.from_pretrained(
         MODEL_ID,
         quantization_config=quantization,
         device_map="auto",
-        max_memory={0: "5.3GiB", "cpu": "7GiB"},
+        max_memory={0: f"{max(5, int(gpu_gib * 0.90))}GiB", "cpu": "10GiB"},
         low_cpu_mem_usage=True,
         attn_implementation="sdpa",
     )
@@ -234,7 +241,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=3107)
+    parser.add_argument("--model", default=MODEL_ID)
+    parser.add_argument("--adapter", type=Path, default=Path(ADAPTER_DIR))
+    parser.add_argument("--model-name", default=None)
     args = parser.parse_args()
+    MODEL_ID = args.model
+    ADAPTER_DIR = args.adapter
+    MODEL_NAME = args.model_name or (
+        DEFAULT_MODEL_NAME
+        if args.adapter == Path("training/output/pcbuild-qwen3.5-2b-qlora-v5")
+        else args.adapter.name
+    )
     import uvicorn
 
     uvicorn.run(app, host=args.host, port=args.port, workers=1)

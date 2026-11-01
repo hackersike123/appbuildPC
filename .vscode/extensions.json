@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "Dart-Code.flutter",
+    "Dart-Code.dart-code",
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-mssql.mssql",
+    "humao.rest-client",
+    "ms-vscode.powershell",
+    "redhat.vscode-yaml"
+  ]
+}
+

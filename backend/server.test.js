@@ -1,7 +1,3 @@
-const { randomBytes } = require('node:crypto');
-
-process.env.JWT_SECRET ??= randomBytes(32).toString('hex');
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -13,10 +9,31 @@ const {
   scanCompletionMatchesCatalog,
   hasVisibleSkuEvidence,
   hasUsableProductPrice,
+  normalizeBuildName,
   selectSqlBuild,
   catalogPromptSelection,
   catalogForVisionCandidate
 } = require('./server');
+const sqlModels = require('./sql-models');
+const handleBuildRoutes = require('./routes/builds');
+const handleAiRoutes = require('./routes/ai');
+
+function createMockResponse() {
+  return {
+    statusCode: null,
+    headers: null,
+    body: null,
+    writableEnded: false,
+    writeHead(status, headers) {
+      this.statusCode = status;
+      this.headers = headers;
+    },
+    end(body) {
+      this.body = JSON.parse(body);
+      this.writableEnded = true;
+    }
+  };
+}
 
 test('health and OpenAPI work while debug headers require authentication', async (t) => {
   await new Promise((resolve, reject) => {
@@ -200,6 +217,14 @@ test('SQL build selection ignores zero-price items and marks estimates', () => {
 
   const marketBuild = selectSqlBuild([...zeroPrice, ...parts], 10000, 'test', 'hcm');
   assert.ok(marketBuild);
+  const longPurposeBuild = selectSqlBuild(
+    parts,
+    10000,
+    'Tạo cấu hình PC gaming cho công việc đồ họa và chơi game với ngân sách dài hơn giới hạn tên lưu SQL',
+    'hcm'
+  );
+  assert.ok(longPurposeBuild);
+  assert.ok(longPurposeBuild.name.length >= 2 && longPurposeBuild.name.length <= 60);
   assert.equal(marketBuild.totalPrice, 2100);
   assert.equal(marketBuild.priceEstimate, false);
 
@@ -211,6 +236,13 @@ test('SQL build selection ignores zero-price items and marks estimates', () => {
   );
   assert.ok(estimatedBuild);
   assert.equal(estimatedBuild.priceEstimate, true);
+});
+
+test('LM Studio build names are trimmed and bounded to the SQL name limit', () => {
+  assert.equal(normalizeBuildName('  '), 'PC theo yêu cầu');
+  const longName = normalizeBuildName('😀'.repeat(80));
+  assert.ok(longName.length >= 2 && longName.length <= 60);
+  assert.equal(longName, '😀'.repeat(30));
 });
 
 test('PC chat receives a compact catalog slice that includes matching products', () => {
@@ -267,4 +299,92 @@ test('vision shortlist follows visible GPU family text over a conflicting visual
     ]
   );
   assert.equal(selected[0].id, 'gpu-rtx-3050');
+});
+
+test('build component updates accept a valid component type', async (t) => {
+  const cpu = { id: 'cpu-test', type: 'CPU', name: 'QA CPU', price: 1000, power: 65 };
+  const build = {
+    id: 'build-test',
+    userId: 'user-test',
+    name: 'QA build',
+    budget: 10000,
+    areaId: 'hcm',
+    components: {},
+    version: 1,
+    status: 'draft'
+  };
+  t.mock.method(sqlModels, 'getBuildById', async () => build);
+  t.mock.method(sqlModels, 'getProductById', async () => cpu);
+  t.mock.method(sqlModels, 'listProducts', async () => [cpu]);
+  t.mock.method(sqlModels, 'updateBuild', async (_buildId, _userId, fields) => {
+    build.components = fields.components;
+    build.version += 1;
+    return build;
+  });
+
+  const res = createMockResponse();
+  await handleBuildRoutes({
+    req: {},
+    res,
+    method: 'PUT',
+    parts: ['api', 'v1', 'builds', 'build-test', 'components', 'CPU'],
+    body: { productId: cpu.id },
+    user: { id: 'user-test', areaId: 'hcm' }
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.components.CPU.id, cpu.id);
+});
+
+test('AI SQL build generation works without pinned components', async (t) => {
+  const catalog = [
+    { id: 'cpu', type: 'CPU', name: 'CPU', price: 500, socket: 'AM5', power: 65, priceSource: 'market' },
+    { id: 'board', type: 'MAINBOARD', name: 'Board', price: 500, socket: 'AM5', ram: 'DDR5', form: 'mATX', priceSource: 'market' },
+    { id: 'gpu', type: 'GPU', name: 'GPU', price: 600, power: 170, length: 200, recommendedPsuW: 550, priceSource: 'market' },
+    { id: 'ram', type: 'RAM', name: 'RAM', price: 100, ram: 'DDR5', priceSource: 'market' },
+    { id: 'ssd', type: 'SSD', name: 'SSD', price: 100, priceSource: 'market' },
+    { id: 'psu', type: 'PSU', name: 'PSU', price: 100, watts: 650, priceSource: 'market' },
+    { id: 'case', type: 'CASE', name: 'Case', price: 100, form: 'mATX', gpuLength: 260, priceSource: 'market' },
+    { id: 'cooler', type: 'TẢN NHIỆT', name: 'Cooler', price: 100, socket: 'AM5', priceSource: 'market' }
+  ];
+  t.mock.method(sqlModels, 'listAreas', async () => [{ id: 'hcm', name: 'TP. Hồ Chí Minh' }]);
+  t.mock.method(sqlModels, 'listProducts', async () => catalog);
+
+  const res = createMockResponse();
+  await handleAiRoutes({
+    req: {},
+    res,
+    method: 'POST',
+    parts: ['api', 'v1', 'ai', 'generate-build'],
+    body: { budget: 10000, purpose: 'test', areaId: 'hcm' },
+    user: { id: 'user-test', areaId: 'hcm' }
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(Object.keys(res.body.components).length, 8);
+});
+
+test('AI build generation rejects an invalid pinned component type', async (t) => {
+  t.mock.method(sqlModels, 'listAreas', async () => [{ id: 'hcm', name: 'TP. Hồ Chí Minh' }]);
+  t.mock.method(sqlModels, 'listProducts', async () => [
+    { id: 'cpu', type: 'CPU', name: 'CPU', price: 500, priceSource: 'market' }
+  ]);
+
+  const res = createMockResponse();
+  await handleAiRoutes({
+    req: {},
+    res,
+    method: 'POST',
+    parts: ['api', 'v1', 'ai', 'generate-build'],
+    body: {
+      budget: 10000,
+      purpose: 'test',
+      areaId: 'hcm',
+      pinnedComponents: { NOT_A_COMPONENT: 'cpu' }
+    },
+    user: { id: 'user-test', areaId: 'hcm' }
+  });
+
+  assert.equal(res.statusCode, 422);
+  assert.equal(res.body.error, 'INVALID_PINNED_COMPONENT');
 });

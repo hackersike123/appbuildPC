@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "pcbuild-sql-readonly": {
+      "type": "stdio",
+      "command": "node",
+      "args": [".codex/mcp/start-dbhub.cjs"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+

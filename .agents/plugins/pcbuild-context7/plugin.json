@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pcbuild-context7",
+  "version": "1.0.0",
+  "description": "Use Context7 documentation lookup for current Flutter, Dart, Node.js, and related library APIs in PCBUILD."
+}
+

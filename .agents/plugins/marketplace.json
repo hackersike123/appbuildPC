@@ -1,0 +1,20 @@
+{
+  "name": "pcbuild-project-tools",
+  "interface": {
+    "displayName": "PCBUILD Project Tools"
+  },
+  "plugins": [
+    {
+      "name": "pcbuild-context7",
+      "source": {
+        "source": "local",
+        "path": "./.agents/plugins/pcbuild-context7"
+      },
+      "interface": {
+        "displayName": "PCBUILD Docs",
+        "shortDescription": "Current library documentation for PCBUILD work"
+      }
+    }
+  ]
+}
+

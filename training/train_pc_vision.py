@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import shutil
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 
@@ -112,6 +113,7 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--device", default="0")
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--resume", action="store_true", help="Resume from output/train/weights/last.pt if it exists")
     args = parser.parse_args()
 
     data_file = args.data.resolve()
@@ -143,7 +145,12 @@ def main() -> None:
 
     from ultralytics import YOLO
 
-    model = YOLO(args.model)
+    last_checkpoint = args.output / "train" / "weights" / "last.pt"
+    if args.resume and last_checkpoint.is_file():
+        print(f"Resuming detector training from {last_checkpoint}")
+        model = YOLO(str(last_checkpoint))
+    else:
+        model = YOLO(args.model)
     results = model.train(
         data=str(data_file),
         epochs=args.epochs,
@@ -158,6 +165,7 @@ def main() -> None:
         exist_ok=True,
         plots=True,
         verbose=True,
+        resume=bool(args.resume and last_checkpoint.is_file()),
     )
     best = Path(model.trainer.best)
     stable_weights = args.output / "weights" / "best.pt"
@@ -177,6 +185,7 @@ def main() -> None:
         exist_ok=True,
     )
     report = {
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "dataset_source": args.dataset_source,
         "dataset_license": args.dataset_license,
         "dataset_config": str(data_file),
@@ -190,6 +199,10 @@ def main() -> None:
         "best_weights": str(stable_weights.resolve()),
     }
     (args.output / "vision_metrics.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (args.output / "training_complete.json").write_text(
+        json.dumps({"completed_at_utc": report["completed_at_utc"], "metrics_file": "vision_metrics.json"}, indent=2),
+        encoding="utf-8",
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

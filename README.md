@@ -47,7 +47,9 @@ Node.js API :3000 ------> SQL Server từ xa
 - Chrome/Edge nếu chạy Web.
 - Node.js 20+ và dependencies trong `backend/node_modules`.
 - LM Studio với model đã tải và Local Server khớp `backend/.env` để chạy các tác vụ AI.
-- Python 3.11 và môi trường `.venv-ai-training` chỉ cần nếu huấn luyện/eval sau này.
+- Python 3.11 và môi trường `.venv-ai-training` chỉ cần nếu train/eval local.
+- Huấn luyện có notebook riêng cho Google Colab; cần đăng nhập Google, bật GPU
+  runtime và có đủ quota Colab. Không cần LLM API token để chạy train.
 - Truy cập được SQL Server đã cấu hình trong `backend/.env`.
 - GPU phù hợp được khuyến nghị cho các phiên train trong tương lai; app hiện tại
   không nạp model QLoRA.
@@ -140,21 +142,30 @@ model qua endpoint `LM_STUDIO_URL` trong cấu hình backend.
 
 ## Dữ liệu và giới hạn AI
 
-Adapter v5 được fine-tune bằng ví dụ PC tổng hợp và hiện là bản đang phục vụ app.
-V9 đạt 8/11, v10 đạt 6/11 và v11 đạt 7/11 trên bộ đánh giá mở rộng nên chưa
-được triển khai. V12 tập trung sửa bốn lỗi an toàn; lượt train đầu dừng ở
-12/24 bước, hiện tiếp tục từ checkpoint lưu sẵn (3/12 bước ở lần cập nhật gần
-nhất). Chỉ thay model đang chạy nếu vượt toàn bộ đánh giá. Vision encoder
-chưa được fine-tune bằng ảnh linh kiện thật có nhãn. Detector YOLO riêng cần
-dataset ảnh linh kiện đã gán nhãn và tập test độc lập trước khi train/bật.
+Runtime hiện tại dùng LM Studio; không adapter tự huấn luyện nào đang phục vụ
+app. Các adapter v5–v18 được giữ làm thử nghiệm offline. V18 Qwen3.5-4B đã resume
+từ checkpoint-40 trên Colab T4 sau khi quota được cấp lại và kết thúc ở bước
+160/306 (epoch 3.137). Best validation loss là `0.8902`, thấp hơn v17 (`0.9822`)
+trên cùng split. Adapter và metrics được lưu tại
+`MyDrive/PCBUILD/runs/pcbuild-qwen3.5-4b-qlora-v18-mb2-colab/checkpoints/final/`;
+adapter v17 vẫn được giữ nguyên. V18 chưa chạy held-out behavioral test nên vẫn
+là ứng viên offline, chưa được tích hợp vào app.
+Vision encoder chưa được fine-tune bằng ảnh linh kiện thật có nhãn. Detector
+YOLO riêng cần dataset ảnh linh kiện đã gán nhãn và tập test độc lập trước khi
+train/bật.
 SQL là nguồn dữ liệu có thẩm quyền cho giá, thông số, tương thích, công suất và
 dữ liệu tài khoản. Giá catalog ước tính được phân biệt với giá khu vực; biểu đồ
 và cảnh báo chỉ dùng giá có trong `dbo.market`. Biểu đồ không tự bịa điểm lịch sử:
 dữ liệu được tích lũy khi API ghi nhận giá theo thời gian.
 
-Chi tiết về tập dữ liệu, train, đánh giá và cách chạy adapter ở
-[training/README.md](./training/README.md). API, SQL, Swagger và SMTP được mô tả
+Chi tiết về tập dữ liệu, train, đánh giá và hai notebook Colab cho QLoRA/detector
+ở [training/README.md](./training/README.md). API, SQL, Swagger và SMTP được mô tả
 trong [backend/README.md](./backend/README.md).
+
+## Kế hoạch mở rộng marketplace và cộng đồng
+
+Kiến trúc, MVP, API và các giai đoạn triển khai website mua bán/trao đổi/build PC
+được ghi trong [docs/marketplace-community-roadmap.md](./docs/marketplace-community-roadmap.md).
 
 ## Kiểm tra và build
 
@@ -171,20 +182,33 @@ npm test
 node --check server.js
 ```
 
-Theo kết quả gần nhất được ghi nhận: Flutter analyze sạch, Flutter có 19 test
-đạt; backend có 4 test đạt. AI hành vi đạt 7/7 và smoke test API với tài khoản
-kiểm thử đạt 5/5. Bộ smoke scan dùng ảnh tổng hợp, chưa đại diện cho ảnh sản phẩm
-thật.
+Sau lần tách module: `flutter analyze` sạch, `flutter test` đạt 20/20, backend
+`npm test` đạt 15/15, kiểm tra cú pháp 28 file JavaScript và `flutter build web`
+đều thành công. V18 có validation loss `0.8902` trên cùng split, thấp hơn v17
+`0.9822`; behavioral held-out evaluation của v18 vẫn đang chờ chạy trước khi
+cân nhắc thay provider runtime. Notebook [PCBUILD_Colab_QLoRA_v20.ipynb](./PCBUILD_Colab_QLoRA_v20.ipynb)
+thử direct-answer refinement từ v18. Lượt micro-batch 2 dừng ở bước 0/90 do
+CUDA OOM, không có checkpoint hoặc kết quả eval. Notebook retry dùng micro-batch 1 × accumulation 4, thư mục Drive riêng và preflight yêu cầu ít nhất 10 GiB VRAM trống. Phiên Colab gần nhất báo thiếu quota; v20 chưa train thành công và chưa có metric. Smoke scan
+trước đây dùng ảnh tổng hợp, chưa đại diện cho ảnh sản phẩm thật.
 
 ## Cấu trúc chính
 
 ```text
-lib/                         Flutter UI, điều hướng và dịch vụ client
-backend/server.js            REST API và điều phối LM Studio
-backend/sql-models.js        SQL persistence runtime
-backend/ensure_schema.js     Chuẩn bị các bảng quan hệ
-training/                     Dataset, checkpoint và công cụ train ngoại tuyến
+lib/main.dart                Flutter library entrypoint và part declarations
+lib/app/, lib/screens/       App shell và màn hình theo tính năng
+lib/widgets/, lib/models/    Widgets dùng chung và model phía client
+lib/api_client.dart          HTTP/session core của REST client
+lib/api_client/              API endpoint extensions theo domain
+backend/server.js            Khởi tạo HTTP server và SQL schema runtime
+backend/routes/              Route handlers theo domain
+backend/auth.js              JWT và chức năng tài khoản/email
+backend/ai-service.js        Adapter LM Studio, prompt và vision
+backend/build-service.js     Logic build, power và compatibility
+backend/sql-models.js        Facade SQL persistence
+backend/sql/                  Connection/schema và query theo domain
+training/                    Dataset, checkpoint và công cụ train ngoại tuyến
 start-full-backend.bat       Khởi động SQL-backed API trên Windows
 ```
 
 Không commit `backend/.env`, mật khẩu SQL, JWT secret hoặc SMTP app password.
+

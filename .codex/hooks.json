@@ -1,0 +1,19 @@
+{
+  "description": "Project-specific guardrails for legacy SQL migration commands.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/db-script-guard.cjs",
+            "timeout": 5,
+            "statusMessage": "Checking SQL migration command"
+          }
+        ]
+      }
+    ]
+  }
+}
+
