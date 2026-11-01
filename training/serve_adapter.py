@@ -191,6 +191,7 @@ def chat_completions(body: dict[str, Any]):
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
+            enable_thinking=False,
         )
     except Exception as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
