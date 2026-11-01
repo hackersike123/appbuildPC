@@ -57,6 +57,19 @@ class ServeAdapterThinkingTests(unittest.TestCase):
         self.assertIn("enable_thinking", kwargs)
         self.assertFalse(kwargs["enable_thinking"])
 
+    def test_greedy_generation_omits_sampling_only_arguments(self):
+        serve_adapter.chat_completions(
+            {
+                "messages": [{"role": "user", "content": "Summarize this PC build."}],
+                "temperature": 0,
+            }
+        )
+
+        generation = self.model.generate.call_args.kwargs
+        self.assertFalse(generation["do_sample"])
+        for key in ("temperature", "top_p", "top_k"):
+            self.assertNotIn(key, generation)
+
 
 if __name__ == "__main__":
     unittest.main()

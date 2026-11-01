@@ -203,12 +203,17 @@ def chat_completions(body: dict[str, Any]):
     generation = {
         "max_new_tokens": max_tokens,
         "do_sample": temperature > 0,
-        "temperature": max(temperature, 0.01),
-        "top_p": min(max(float(body.get("top_p", 0.8)), 0.01), 1.0),
-        "top_k": 20,
         "repetition_penalty": 1.0,
         "pad_token_id": processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id,
     }
+    if temperature > 0:
+        generation.update(
+            {
+                "temperature": max(temperature, 0.01),
+                "top_p": min(max(float(body.get("top_p", 0.8)), 0.01), 1.0),
+                "top_k": 20,
+            }
+        )
     with generation_lock, torch.inference_mode():
         output = model.generate(**inputs, **generation)
     reply = processor.decode(
